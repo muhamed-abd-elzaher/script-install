@@ -372,6 +372,10 @@ fi
 echo -e "\n---- Setting permissions on home folder ----"
 sudo chown -R $OE_USER:$OE_USER $OE_HOME/
 
+echo -e "\n---- Fix SELinux context for Odoo binary ----"
+sudo restorecon -R $OE_HOME/ 2>/dev/null || true
+sudo chcon -t bin_t $OE_HOME_EXT/odoo-bin 2>/dev/null || true
+
 echo -e "\n---- Create custom module directory ----"
 sudo su $OE_USER -c "mkdir -p $OE_HOME/custom"
 sudo su $OE_USER -c "mkdir -p $OE_HOME/custom/addons"
