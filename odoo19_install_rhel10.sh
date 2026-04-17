@@ -576,7 +576,56 @@ if [ "$INSTALL_NGINX" = "True" ]; then
     echo -e "\n---- Installing and configuring Nginx ----"
     dnf_install nginx
 
-    sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<'NGINXEOF'
+    # Determine if we should configure SSL
+    CONFIGURE_SSL="False"
+    if [ "$ENABLE_SSL" = "True" ] && [ "$ADMIN_EMAIL" != "odoo@example.com" ] && [ "$WEBSITE_NAME" != "_" ]; then
+        CONFIGURE_SSL="True"
+    fi
+
+    if [ "$CONFIGURE_SSL" = "True" ]; then
+        #----------------------------------------------
+        # Step 1: Write temporary HTTP-only config for Certbot challenge
+        #----------------------------------------------
+        echo -e "\n---- Writing temporary HTTP config for Certbot ----"
+        sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<'NGINXEOF'
+server {
+    listen 80;
+    server_name WEBSITE_NAME_PLACEHOLDER;
+
+    location / {
+        proxy_pass http://127.0.0.1:OE_PORT_PLACEHOLDER;
+    }
+}
+NGINXEOF
+
+        sudo sed -i "s/OE_PORT_PLACEHOLDER/$OE_PORT/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
+        sudo sed -i "s/WEBSITE_NAME_PLACEHOLDER/$WEBSITE_NAME/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
+
+        sudo systemctl enable nginx
+        sudo systemctl start nginx
+        sudo systemctl reload nginx
+
+        #----------------------------------------------
+        # Step 2: Obtain SSL certificate with Certbot
+        #----------------------------------------------
+        echo -e "\n---- Installing Certbot and obtaining SSL certificate ----"
+        dnf_install certbot python3-certbot-nginx
+        sudo certbot certonly --nginx -d $WEBSITE_NAME --noninteractive --agree-tos --email $ADMIN_EMAIL
+
+        if [ ! -f /etc/letsencrypt/live/$WEBSITE_NAME/fullchain.pem ]; then
+            echo "WARNING: Certbot failed to obtain certificate."
+            echo "  -> Make sure DNS for $WEBSITE_NAME points to this server."
+            echo "  -> Falling back to HTTP-only config."
+            CONFIGURE_SSL="False"
+        fi
+    fi
+
+    if [ "$CONFIGURE_SSL" = "True" ]; then
+        #----------------------------------------------
+        # Step 3: Write final HTTPS Nginx config
+        #----------------------------------------------
+        echo -e "\n---- Writing HTTPS Nginx config ----"
+        sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<'NGINXEOF'
 # Odoo backend upstream
 upstream odoo {
     server 127.0.0.1:OE_PORT_PLACEHOLDER;
@@ -593,9 +642,25 @@ map $http_upgrade $connection_upgrade {
     ''      close;
 }
 
+# HTTP -> HTTPS redirect
 server {
     listen 80;
     server_name WEBSITE_NAME_PLACEHOLDER;
+    return 301 https://$host$request_uri;
+}
+
+# HTTPS server
+server {
+    listen 443 ssl http2;
+    server_name WEBSITE_NAME_PLACEHOLDER;
+
+    # SSL certificates (Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/WEBSITE_NAME_PLACEHOLDER/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/WEBSITE_NAME_PLACEHOLDER/privkey.pem;
+    ssl_session_timeout 30m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
 
     # Timeouts
     proxy_read_timeout 720s;
@@ -642,39 +707,102 @@ server {
 }
 NGINXEOF
 
+        # Set up auto-renewal cron for Let's Encrypt
+        echo -e "\n---- Setting up Certbot auto-renewal ----"
+        (sudo crontab -l 2>/dev/null; echo "0 0,12 * * * certbot renew --quiet --post-hook 'systemctl reload nginx'") | sudo crontab - 2>/dev/null || true
+
+        echo "SSL/HTTPS is enabled with Let's Encrypt!"
+
+    else
+        #----------------------------------------------
+        # HTTP-only Nginx config (no SSL)
+        #----------------------------------------------
+        echo -e "\n---- Writing HTTP-only Nginx config ----"
+        sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<'NGINXEOF'
+# Odoo backend upstream
+upstream odoo {
+    server 127.0.0.1:OE_PORT_PLACEHOLDER;
+}
+
+# Odoo gevent upstream (websocket)
+upstream odoochat {
+    server 127.0.0.1:LONGPOLLING_PORT_PLACEHOLDER;
+}
+
+# Required for websocket upgrade (must be at http context level)
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name WEBSITE_NAME_PLACEHOLDER;
+
+    # Timeouts
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
+
+    # Log files
+    access_log /var/log/nginx/OE_USER_PLACEHOLDER-access.log;
+    error_log  /var/log/nginx/OE_USER_PLACEHOLDER-error.log;
+
+    # Request limits
+    client_max_body_size 0;
+
+    # Redirect websocket requests to odoo gevent port
+    location /websocket {
+        proxy_pass http://odoochat;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Redirect requests to odoo backend server
+    location / {
+        proxy_pass http://odoo;
+        proxy_redirect off;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
+    # Common gzip
+    gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
+    gzip on;
+}
+NGINXEOF
+
+        if [ "$ENABLE_SSL" = "True" ]; then
+            echo "SSL/HTTPS not enabled."
+            if [ "$ADMIN_EMAIL" = "odoo@example.com" ]; then
+                echo "  -> Set ADMIN_EMAIL to a real email address."
+            fi
+            if [ "$WEBSITE_NAME" = "_" ]; then
+                echo "  -> Set WEBSITE_NAME to your domain (e.g. odoo.example.com)."
+            fi
+        fi
+    fi
+
     # Replace placeholders with actual values
     sudo sed -i "s/OE_PORT_PLACEHOLDER/$OE_PORT/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
     sudo sed -i "s/LONGPOLLING_PORT_PLACEHOLDER/$LONGPOLLING_PORT/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
     sudo sed -i "s/WEBSITE_NAME_PLACEHOLDER/$WEBSITE_NAME/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
     sudo sed -i "s/OE_USER_PLACEHOLDER/$OE_USER/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
 
-    # On RHEL, Nginx uses conf.d/ instead of sites-available/sites-enabled
+    # Start / reload Nginx
     sudo systemctl enable nginx
     sudo systemctl start nginx
-    sudo systemctl reload nginx
+    sudo nginx -t && sudo systemctl reload nginx
 
     echo "Nginx configured. File: /etc/nginx/conf.d/${OE_CONFIG}.conf"
 else
     echo "Nginx not installed (user choice)."
-fi
-
-#--------------------------------------------------
-# Enable SSL with certbot
-#--------------------------------------------------
-if [ "$INSTALL_NGINX" = "True" ] && [ "$ENABLE_SSL" = "True" ] && [ "$ADMIN_EMAIL" != "odoo@example.com" ] && [ "$WEBSITE_NAME" != "_" ]; then
-    echo -e "\n---- Installing Certbot for SSL ----"
-    dnf_install certbot python3-certbot-nginx
-    sudo certbot --nginx -d $WEBSITE_NAME --noninteractive --agree-tos --email $ADMIN_EMAIL --redirect
-    sudo systemctl reload nginx
-    echo "SSL/HTTPS is enabled!"
-else
-    echo "SSL/HTTPS not enabled."
-    if [ "$ADMIN_EMAIL" = "odoo@example.com" ]; then
-        echo "  -> Use a real email address for Certbot registration."
-    fi
-    if [ "$WEBSITE_NAME" = "_" ]; then
-        echo "  -> Set a real domain name for SSL certificate."
-    fi
 fi
 
 #--------------------------------------------------
