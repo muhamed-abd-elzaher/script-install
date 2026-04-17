@@ -62,12 +62,11 @@ ADMIN_EMAIL="odoo@example.com"
 #==================================================
 
 # pip install with --break-system-packages if supported (PEP 668 on RHEL 10 / Python 3.12)
-# Uses sudo PATH=$PATH to explicitly pass PATH (needed for pg_config when building psycopg2)
 pip_install() {
   if pip3 help install 2>/dev/null | grep -q -- '--break-system-packages'; then
-    sudo -H PATH="$PATH" pip3 install --break-system-packages "$@"
+    sudo -H pip3 install --break-system-packages "$@"
   else
-    sudo -H PATH="$PATH" pip3 install "$@"
+    sudo -H pip3 install "$@"
   fi
 }
 
@@ -181,6 +180,10 @@ SQL
     # Add psql/pg_config to PATH for this session and future logins
     echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
     export PATH=/usr/pgsql-17/bin:$PATH
+
+    # Create symlinks so pg_config is always findable (even inside sudo)
+    sudo ln -sf /usr/pgsql-17/bin/pg_config /usr/bin/pg_config
+    sudo ln -sf /usr/pgsql-17/bin/psql /usr/bin/psql
 
 else
     echo -e "\n---- Installing default PostgreSQL from RHEL AppStream ----"
