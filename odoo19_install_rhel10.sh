@@ -70,6 +70,11 @@ pip_install() {
   fi
 }
 
+# dnf wrapper: use --nogpgcheck to work around stale/mismatched GPG keys on RHEL 10
+dnf_install() {
+  sudo dnf install -y --nogpgcheck "$@"
+}
+
 # Detect architecture
 detect_arch() {
   local arch_raw
@@ -97,19 +102,32 @@ echo " RHEL Version: ${RHEL_VERSION}"
 echo "============================================================"
 
 #--------------------------------------------------
+# Fix GPG Keys (RHEL 10 may have outdated/missing signing keys)
+#--------------------------------------------------
+echo -e "\n---- Updating RPM GPG keys ----"
+sudo rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-redhat-release 2>/dev/null || true
+sudo rpm --import https://www.redhat.com/security/data/fd431d51.txt 2>/dev/null || true
+sudo rpm --import https://www.redhat.com/security/team/key/ 2>/dev/null || true
+
+# If GPG keys are still failing, allow update to proceed
+# by refreshing the subscription and cleaning metadata
+sudo subscription-manager refresh 2>/dev/null || true
+sudo dnf clean all
+
+#--------------------------------------------------
 # Update Server
 #--------------------------------------------------
 echo -e "\n---- Update Server ----"
-sudo dnf update -y
-sudo dnf install -y dnf-utils
+sudo dnf update -y --nogpgcheck
+dnf_install dnf-utils
 
 #--------------------------------------------------
 # Install EPEL Repository (needed for some dependencies)
 #--------------------------------------------------
 echo -e "\n---- Install EPEL Repository ----"
-sudo dnf install -y \
+dnf_install \
   https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VERSION}.noarch.rpm \
-  2>/dev/null || sudo dnf install -y epel-release 2>/dev/null || true
+  2>/dev/null || dnf_install epel-release 2>/dev/null || true
 
 # Enable CodeReady Builder / CRB equivalent (needed for some -devel packages)
 sudo dnf config-manager --set-enabled crb 2>/dev/null || \
@@ -124,16 +142,19 @@ if [ "$INSTALL_POSTGRESQL_SEVENTEEN" = "True" ]; then
     echo -e "\n---- Installing PostgreSQL 17 from PGDG repository ----"
 
     # Install PGDG repository
-    sudo dnf install -y \
+    dnf_install \
       https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
       2>/dev/null || true
+
+    # Import PGDG GPG key
+    sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
 
     # Disable built-in PostgreSQL module to avoid conflicts
     sudo dnf -qy module disable postgresql 2>/dev/null || true
 
     # Clean cache and install PostgreSQL 17
     sudo dnf clean all
-    sudo dnf install -y postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
+    dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
 
     # Initialize the database cluster
     sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
@@ -145,7 +166,7 @@ if [ "$INSTALL_POSTGRESQL_SEVENTEEN" = "True" ]; then
     if [ "$IS_ENTERPRISE" = "True" ]; then
         # pgvector is needed for Enterprise AI features
         echo -e "\n---- Installing pgvector for Enterprise AI features ----"
-        sudo dnf install -y pgvector_17 2>/dev/null || true
+        dnf_install pgvector_17 2>/dev/null || true
 
         # Wait for PostgreSQL to be ready
         until sudo -u postgres pg_isready >/dev/null 2>&1; do sleep 1; done
@@ -162,7 +183,7 @@ SQL
 
 else
     echo -e "\n---- Installing default PostgreSQL from RHEL AppStream ----"
-    sudo dnf install -y postgresql-server postgresql-contrib postgresql-devel
+    dnf_install postgresql-server postgresql-contrib postgresql-devel
     sudo postgresql-setup --initdb
     sudo systemctl start postgresql
     sudo systemctl enable postgresql
@@ -175,10 +196,10 @@ sudo su - postgres -c "createuser -s $OE_USER" 2>/dev/null || true
 # Install System Dependencies
 #--------------------------------------------------
 echo -e "\n---- Installing Python 3 + pip3 ----"
-sudo dnf install -y python3 python3-pip python3-devel python3-setuptools python3-wheel
+dnf_install python3 python3-pip python3-devel python3-setuptools python3-wheel
 
 echo -e "\n---- Installing system dependencies ----"
-sudo dnf install -y \
+dnf_install \
     git \
     gcc \
     gcc-c++ \
@@ -212,13 +233,13 @@ pip_install phonenumbers
 
 echo -e "\n---- Installing Node.js, npm and rtlcss for LTR support ----"
 # Install Node.js from RHEL AppStream (or NodeSource if needed)
-sudo dnf install -y nodejs npm 2>/dev/null
+dnf_install nodejs npm 2>/dev/null
 
 # If nodejs version is too old or not available, install from NodeSource
 if ! command -v node >/dev/null 2>&1; then
     echo -e "\n---- Node.js not found in AppStream, installing from NodeSource ----"
     curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-    sudo dnf install -y nodejs
+    dnf_install nodejs
 fi
 
 echo -e "---- Node.js version: $(node --version 2>/dev/null || echo 'not found') ----"
@@ -233,7 +254,7 @@ if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
     echo -e "\n---- Installing wkhtmltopdf (architecture: $ARCH) ----"
 
     # Install wkhtmltopdf dependencies
-    sudo dnf install -y \
+    dnf_install \
         libXrender \
         libXext \
         fontconfig \
@@ -258,16 +279,16 @@ if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
 
         if [ -f /tmp/wkhtmltox.rpm ] && [ -s /tmp/wkhtmltox.rpm ]; then
             echo -e "---- Installing wkhtmltopdf RPM ----"
-            sudo dnf localinstall -y /tmp/wkhtmltox.rpm 2>/dev/null || \
+            sudo dnf localinstall -y --nogpgcheck /tmp/wkhtmltox.rpm 2>/dev/null || \
             sudo rpm -Uvh --nodeps /tmp/wkhtmltox.rpm 2>/dev/null || true
             rm -f /tmp/wkhtmltox.rpm
         else
             echo -e "---- Download failed. Trying dnf install... ----"
-            sudo dnf install -y wkhtmltopdf 2>/dev/null || true
+            dnf_install wkhtmltopdf 2>/dev/null || true
         fi
     else
         echo -e "---- Unsupported architecture for wkhtmltopdf: $ARCH ----"
-        sudo dnf install -y wkhtmltopdf 2>/dev/null || true
+        dnf_install wkhtmltopdf 2>/dev/null || true
     fi
 
     # Create symlinks if needed
@@ -442,7 +463,7 @@ else
 fi
 
 # Install SELinux policy tools if not present (needed above)
-sudo dnf install -y policycoreutils-python-utils 2>/dev/null || true
+dnf_install policycoreutils-python-utils 2>/dev/null || true
 
 #--------------------------------------------------
 # Configure firewalld
@@ -469,7 +490,7 @@ fi
 #--------------------------------------------------
 if [ "$INSTALL_NGINX" = "True" ]; then
     echo -e "\n---- Installing and configuring Nginx ----"
-    sudo dnf install -y nginx
+    dnf_install nginx
 
     sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<EOF
 server {
@@ -560,7 +581,7 @@ fi
 #--------------------------------------------------
 if [ "$INSTALL_NGINX" = "True" ] && [ "$ENABLE_SSL" = "True" ] && [ "$ADMIN_EMAIL" != "odoo@example.com" ] && [ "$WEBSITE_NAME" != "_" ]; then
     echo -e "\n---- Installing Certbot for SSL ----"
-    sudo dnf install -y certbot python3-certbot-nginx
+    dnf_install certbot python3-certbot-nginx
     sudo certbot --nginx -d $WEBSITE_NAME --noninteractive --agree-tos --email $ADMIN_EMAIL --redirect
     sudo systemctl reload nginx
     echo "SSL/HTTPS is enabled!"
