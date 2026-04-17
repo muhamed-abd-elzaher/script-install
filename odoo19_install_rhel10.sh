@@ -454,12 +454,12 @@ limit_memory_soft = ${LIMIT_MEMORY_SOFT}
 limit_time_cpu = 600
 limit_time_real = 1200
 limit_time_real_cron = -1
-limit_request = 8192
+limit_request = 65536
 
-; Proxy mode (set to True when behind Nginx)
+; Proxy mode (must be True when behind Nginx)
 proxy_mode = True
 
-; Gevent port for websocket/longpolling (used when workers > 0)
+; Gevent port for websocket (used when workers > 0)
 gevent_port = ${LONGPOLLING_PORT}
 EOF
 
@@ -577,120 +577,68 @@ if [ "$INSTALL_NGINX" = "True" ]; then
     dnf_install nginx
 
     sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<'NGINXEOF'
-# Odoo upstream (HTTP)
+# Odoo backend upstream
 upstream odoo {
     server 127.0.0.1:OE_PORT_PLACEHOLDER;
 }
 
-# Odoo upstream (longpolling / websocket)
-upstream odoo-websocket {
+# Odoo gevent upstream (websocket)
+upstream odoochat {
     server 127.0.0.1:LONGPOLLING_PORT_PLACEHOLDER;
 }
 
-# HTTP -> HTTPS redirect (uncomment if SSL is enabled)
-# server {
-#     listen 80;
-#     server_name WEBSITE_NAME_PLACEHOLDER;
-#     return 301 https://$host$request_uri;
-# }
+# Required for websocket upgrade (must be at http context level)
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
 
 server {
     listen 80;
     server_name WEBSITE_NAME_PLACEHOLDER;
-
-    # Proxy headers
-    proxy_set_header X-Forwarded-Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Real-IP $remote_addr;
-
-    # Security headers
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-XSS-Protection "1; mode=block";
-    add_header X-Content-Type-Options "nosniff";
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
-
-    # Log files
-    access_log /var/log/nginx/OE_USER_PLACEHOLDER-access.log;
-    error_log  /var/log/nginx/OE_USER_PLACEHOLDER-error.log;
-
-    # Proxy buffers
-    proxy_buffers 16 64k;
-    proxy_buffer_size 128k;
 
     # Timeouts
     proxy_read_timeout 720s;
     proxy_connect_timeout 720s;
     proxy_send_timeout 720s;
 
-    # Backend failover
-    proxy_next_upstream error timeout invalid_header http_500 http_502 http_503;
-
-    types {
-        text/less less;
-        text/scss scss;
-    }
-
-    # Compression
-    gzip on;
-    gzip_min_length 1100;
-    gzip_buffers 4 32k;
-    gzip_types text/css text/less text/plain text/xml application/xml application/json application/javascript application/pdf image/jpeg image/png;
-    gzip_vary on;
+    # Log files
+    access_log /var/log/nginx/OE_USER_PLACEHOLDER-access.log;
+    error_log  /var/log/nginx/OE_USER_PLACEHOLDER-error.log;
 
     # Request limits
-    client_header_buffer_size 4k;
-    large_client_header_buffers 4 64k;
     client_max_body_size 0;
 
-    # Websocket support (Odoo 19 uses /websocket instead of /longpolling)
+    # Redirect websocket requests to odoo gevent port
     location /websocket {
-        proxy_pass http://odoo-websocket;
+        proxy_pass http://odoochat;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
-        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 86400;
+
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+        proxy_cookie_flags session_id samesite=lax secure;
     }
 
-    # Longpolling fallback (for older clients)
-    location /longpolling {
-        proxy_pass http://odoo-websocket;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-
-    # Static files with caching
-    location ~* /web/static/ {
-        proxy_cache_valid 200 302 60m;
-        proxy_cache_valid 404 1m;
-        proxy_buffering on;
-        expires 864000;
-        proxy_pass http://odoo;
-    }
-
-    # Asset files with cache headers
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-        expires 2d;
-        proxy_pass http://odoo;
-        add_header Cache-Control "public, no-transform";
-    }
-
-    # All other requests go to Odoo
+    # Redirect requests to odoo backend server
     location / {
         proxy_pass http://odoo;
         proxy_redirect off;
-    }
-}
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
 
-# Required for websocket upgrade
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
+        proxy_cookie_flags session_id samesite=lax secure;
+    }
+
+    # Common gzip
+    gzip_types text/css text/scss text/plain text/xml application/xml application/json application/javascript;
+    gzip on;
 }
 NGINXEOF
 
