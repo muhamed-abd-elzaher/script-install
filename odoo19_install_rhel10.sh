@@ -33,11 +33,11 @@ OE_VERSION="19.0"
 # You MUST have access to https://github.com/odoo/enterprise (Odoo Partner)
 IS_ENTERPRISE="False"
 
-# Install PostgreSQL 16 from PGDG repository (recommended for Odoo 19)
-INSTALL_POSTGRESQL_SIXTEEN="True"
+# Install PostgreSQL 17 from PGDG repository (recommended for Odoo 19)
+INSTALL_POSTGRESQL_SEVENTEEN="True"
 
 # Set to True to install Nginx as reverse proxy
-INSTALL_NGINX="False"
+INSTALL_NGINX="True"
 
 # Superadmin (master) password
 OE_SUPERADMIN="admin"
@@ -120,8 +120,8 @@ sudo subscription-manager repos --enable codeready-builder-for-rhel-${RHEL_VERSI
 # Install PostgreSQL Server
 #--------------------------------------------------
 echo -e "\n---- Install PostgreSQL Server ----"
-if [ "$INSTALL_POSTGRESQL_SIXTEEN" = "True" ]; then
-    echo -e "\n---- Installing PostgreSQL 16 from PGDG repository ----"
+if [ "$INSTALL_POSTGRESQL_SEVENTEEN" = "True" ]; then
+    echo -e "\n---- Installing PostgreSQL 17 from PGDG repository ----"
 
     # Install PGDG repository
     sudo dnf install -y \
@@ -131,21 +131,21 @@ if [ "$INSTALL_POSTGRESQL_SIXTEEN" = "True" ]; then
     # Disable built-in PostgreSQL module to avoid conflicts
     sudo dnf -qy module disable postgresql 2>/dev/null || true
 
-    # Clean cache and install PostgreSQL 16
+    # Clean cache and install PostgreSQL 17
     sudo dnf clean all
-    sudo dnf install -y postgresql16 postgresql16-server postgresql16-contrib postgresql16-devel
+    sudo dnf install -y postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
 
     # Initialize the database cluster
-    sudo /usr/pgsql-16/bin/postgresql-16-setup initdb
+    sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
 
     # Start and enable PostgreSQL
-    sudo systemctl start postgresql-16
-    sudo systemctl enable postgresql-16
+    sudo systemctl start postgresql-17
+    sudo systemctl enable postgresql-17
 
     if [ "$IS_ENTERPRISE" = "True" ]; then
         # pgvector is needed for Enterprise AI features
         echo -e "\n---- Installing pgvector for Enterprise AI features ----"
-        sudo dnf install -y pgvector_16 2>/dev/null || true
+        sudo dnf install -y pgvector_17 2>/dev/null || true
 
         # Wait for PostgreSQL to be ready
         until sudo -u postgres pg_isready >/dev/null 2>&1; do sleep 1; done
@@ -157,8 +157,8 @@ SQL
     fi
 
     # Add psql to PATH for convenience
-    echo 'export PATH=/usr/pgsql-16/bin:$PATH' | sudo tee /etc/profile.d/postgresql16.sh
-    source /etc/profile.d/postgresql16.sh 2>/dev/null || true
+    echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
+    source /etc/profile.d/postgresql17.sh 2>/dev/null || true
 
 else
     echo -e "\n---- Installing default PostgreSQL from RHEL AppStream ----"
@@ -380,8 +380,8 @@ sudo chmod 755 $OE_HOME_EXT/start.sh
 echo -e "\n---- Creating systemd service file ----"
 
 # Determine correct PostgreSQL service name for After= directive
-if [ "$INSTALL_POSTGRESQL_SIXTEEN" = "True" ]; then
-    PG_SERVICE="postgresql-16.service"
+if [ "$INSTALL_POSTGRESQL_SEVENTEEN" = "True" ]; then
+    PG_SERVICE="postgresql-17.service"
 else
     PG_SERVICE="postgresql.service"
 fi
