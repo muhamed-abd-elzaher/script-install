@@ -33,8 +33,16 @@ OE_VERSION="19.0"
 # You MUST have access to https://github.com/odoo/enterprise (Odoo Partner)
 IS_ENTERPRISE="False"
 
-# Install PostgreSQL 17 from PGDG repository (recommended for Odoo 19)
-INSTALL_POSTGRESQL_SEVENTEEN="True"
+# PostgreSQL configuration
+# Set to "local" to install PostgreSQL 17 server locally
+# Set to "remote" to only install client libs (PostgreSQL is on another machine)
+POSTGRESQL_MODE="remote"
+
+# Remote PostgreSQL settings (only used when POSTGRESQL_MODE="remote")
+DB_HOST="localhost"
+DB_PORT="5432"
+DB_USER="odoo"
+DB_PASSWORD="False"
 
 # Set to True to install Nginx as reverse proxy
 INSTALL_NGINX="True"
@@ -50,8 +58,20 @@ OE_CONFIG="${OE_USER}-server"
 # Website name for Nginx (set your domain, e.g. odoo.example.com)
 WEBSITE_NAME="_"
 
-# Longpolling port (used when workers > 0)
+# Longpolling / websocket port (used when workers > 0)
 LONGPOLLING_PORT="8072"
+
+# Workers configuration
+# Set to 0 to auto-calculate based on CPU cores: (CPU * 2) + 1
+# Set to a specific number to override
+WORKERS=0
+
+# Memory limits per worker (in bytes)
+LIMIT_MEMORY_HARD=2684354560
+LIMIT_MEMORY_SOFT=2147483648
+
+# Max cron threads
+MAX_CRON_THREADS=2
 
 # SSL Configuration
 ENABLE_SSL="True"
@@ -95,10 +115,19 @@ detect_arch() {
 
 detect_arch
 
+# Auto-calculate workers if set to 0
+if [ "$WORKERS" -eq 0 ]; then
+    CPU_COUNT=$(nproc --all 2>/dev/null || echo 2)
+    WORKERS=$(( CPU_COUNT * 2 + 1 ))
+    echo "Auto-detected $CPU_COUNT CPU cores, setting workers to $WORKERS"
+fi
+
 echo "============================================================"
 echo " Odoo 19 Installation Script for RHEL 10"
 echo " Architecture: ${ARCH}"
 echo " RHEL Version: ${RHEL_VERSION}"
+echo " PostgreSQL:   ${POSTGRESQL_MODE}"
+echo " Workers:      ${WORKERS}"
 echo "============================================================"
 
 #--------------------------------------------------
@@ -135,25 +164,24 @@ sudo dnf config-manager --set-enabled codeready-builder-for-rhel-${RHEL_VERSION}
 sudo subscription-manager repos --enable codeready-builder-for-rhel-${RHEL_VERSION}-${ARCH}-rpms 2>/dev/null || true
 
 #--------------------------------------------------
-# Install PostgreSQL Server
+# Install PostgreSQL
 #--------------------------------------------------
-echo -e "\n---- Install PostgreSQL Server ----"
-if [ "$INSTALL_POSTGRESQL_SEVENTEEN" = "True" ]; then
-    echo -e "\n---- Installing PostgreSQL 17 from PGDG repository ----"
+echo -e "\n---- Install PostgreSQL (mode: ${POSTGRESQL_MODE}) ----"
 
-    # Install PGDG repository
-    dnf_install \
-      https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
-      2>/dev/null || true
+# Install PGDG repository (needed for both modes)
+dnf_install \
+  https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
+  2>/dev/null || true
 
-    # Import PGDG GPG key
-    sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
+# Import PGDG GPG key
+sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
 
-    # Disable built-in PostgreSQL module to avoid conflicts
-    sudo dnf -qy module disable postgresql 2>/dev/null || true
+# Disable built-in PostgreSQL module to avoid conflicts
+sudo dnf -qy module disable postgresql 2>/dev/null || true
+sudo dnf clean all
 
-    # Clean cache and install PostgreSQL 17
-    sudo dnf clean all
+if [ "$POSTGRESQL_MODE" = "local" ]; then
+    echo -e "\n---- Installing PostgreSQL 17 Server locally ----"
     dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
 
     # Initialize the database cluster
@@ -177,24 +205,21 @@ CREATE EXTENSION IF NOT EXISTS vector;
 SQL
     fi
 
-    # Add psql/pg_config to PATH for this session and future logins
-    echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
-    export PATH=/usr/pgsql-17/bin:$PATH
-
-    # Create symlinks so pg_config is always findable (even inside sudo)
-    sudo ln -sf /usr/pgsql-17/bin/pg_config /usr/bin/pg_config
-    sudo ln -sf /usr/pgsql-17/bin/psql /usr/bin/psql
+    echo -e "\n---- Creating the ODOO PostgreSQL User ----"
+    sudo su - postgres -c "createuser -s $OE_USER" 2>/dev/null || true
 
 else
-    echo -e "\n---- Installing default PostgreSQL from RHEL AppStream ----"
-    dnf_install postgresql-server postgresql-contrib postgresql-devel
-    sudo postgresql-setup --initdb
-    sudo systemctl start postgresql
-    sudo systemctl enable postgresql
+    echo -e "\n---- Installing PostgreSQL 17 client libs only (remote DB) ----"
+    dnf_install postgresql17-libs postgresql17-devel postgresql17
 fi
 
-echo -e "\n---- Creating the ODOO PostgreSQL User ----"
-sudo su - postgres -c "createuser -s $OE_USER" 2>/dev/null || true
+# Add psql/pg_config to PATH for this session and future logins
+echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
+export PATH=/usr/pgsql-17/bin:$PATH
+
+# Create symlinks so pg_config is always findable (even inside sudo)
+sudo ln -sf /usr/pgsql-17/bin/pg_config /usr/bin/pg_config
+sudo ln -sf /usr/pgsql-17/bin/psql /usr/bin/psql
 
 #--------------------------------------------------
 # Install System Dependencies
@@ -390,19 +415,53 @@ if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
     OE_SUPERADMIN=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
 fi
 
+# Build addons_path
+if [ "$IS_ENTERPRISE" = "True" ]; then
+    ADDONS_PATH="${OE_HOME}/enterprise/addons,${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons"
+else
+    ADDONS_PATH="${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons"
+fi
+
+# Build database config
+if [ "$POSTGRESQL_MODE" = "remote" ]; then
+    DB_CONFIG="db_host = ${DB_HOST}
+db_port = ${DB_PORT}
+db_user = ${DB_USER}
+db_password = ${DB_PASSWORD}"
+else
+    DB_CONFIG="db_host = False
+db_port = False
+db_user = ${OE_USER}
+db_password = False"
+fi
+
 sudo bash -c "cat > /etc/${OE_CONFIG}.conf" <<EOF
 [options]
 ; This is the password that allows database operations:
 admin_passwd = ${OE_SUPERADMIN}
 http_port = ${OE_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
-EOF
+addons_path = ${ADDONS_PATH}
 
-if [ "$IS_ENTERPRISE" = "True" ]; then
-    sudo bash -c "echo 'addons_path = ${OE_HOME}/enterprise/addons,${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons' >> /etc/${OE_CONFIG}.conf"
-else
-    sudo bash -c "echo 'addons_path = ${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons' >> /etc/${OE_CONFIG}.conf"
-fi
+; Database
+${DB_CONFIG}
+
+; Workers and performance
+workers = ${WORKERS}
+max_cron_threads = ${MAX_CRON_THREADS}
+limit_memory_hard = ${LIMIT_MEMORY_HARD}
+limit_memory_soft = ${LIMIT_MEMORY_SOFT}
+limit_time_cpu = 600
+limit_time_real = 1200
+limit_time_real_cron = -1
+limit_request = 8192
+
+; Proxy mode (set to True when behind Nginx)
+proxy_mode = True
+
+; Gevent port for websocket/longpolling (used when workers > 0)
+gevent_port = ${LONGPOLLING_PORT}
+EOF
 
 sudo chown $OE_USER:$OE_USER /etc/${OE_CONFIG}.conf
 sudo chmod 640 /etc/${OE_CONFIG}.conf
@@ -422,19 +481,21 @@ sudo chmod 755 $OE_HOME_EXT/start.sh
 #--------------------------------------------------
 echo -e "\n---- Creating systemd service file ----"
 
-# Determine correct PostgreSQL service name for After= directive
-if [ "$INSTALL_POSTGRESQL_SEVENTEEN" = "True" ]; then
-    PG_SERVICE="postgresql-17.service"
+# Determine service dependencies based on PostgreSQL mode
+if [ "$POSTGRESQL_MODE" = "local" ]; then
+    PG_UNIT_AFTER="After=network.target postgresql-17.service"
+    PG_UNIT_REQUIRES="Requires=postgresql-17.service"
 else
-    PG_SERVICE="postgresql.service"
+    PG_UNIT_AFTER="After=network.target"
+    PG_UNIT_REQUIRES=""
 fi
 
 sudo bash -c "cat > /etc/systemd/system/${OE_CONFIG}.service" <<EOF
 [Unit]
 Description=Odoo 19
 Documentation=https://www.odoo.com
-After=network.target ${PG_SERVICE}
-Requires=${PG_SERVICE}
+${PG_UNIT_AFTER}
+${PG_UNIT_REQUIRES}
 
 [Service]
 Type=simple
@@ -459,6 +520,10 @@ sudo systemctl enable ${OE_CONFIG}.service
 # Configure SELinux (allow Odoo to bind to its port)
 #--------------------------------------------------
 echo -e "\n---- Configuring SELinux for Odoo ----"
+
+# Install SELinux policy tools if not present
+dnf_install policycoreutils-python-utils 2>/dev/null || true
+
 if command -v getenforce >/dev/null 2>&1; then
     SELINUX_STATUS=$(getenforce)
     echo -e "---- SELinux is: $SELINUX_STATUS ----"
@@ -483,9 +548,6 @@ if command -v getenforce >/dev/null 2>&1; then
 else
     echo -e "---- SELinux tools not found, skipping ----"
 fi
-
-# Install SELinux policy tools if not present (needed above)
-dnf_install policycoreutils-python-utils 2>/dev/null || true
 
 #--------------------------------------------------
 # Configure firewalld
@@ -514,32 +576,52 @@ if [ "$INSTALL_NGINX" = "True" ]; then
     echo -e "\n---- Installing and configuring Nginx ----"
     dnf_install nginx
 
-    sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<EOF
+    sudo bash -c "cat > /etc/nginx/conf.d/${OE_CONFIG}.conf" <<'NGINXEOF'
+# Odoo upstream (HTTP)
+upstream odoo {
+    server 127.0.0.1:OE_PORT_PLACEHOLDER;
+}
+
+# Odoo upstream (longpolling / websocket)
+upstream odoo-websocket {
+    server 127.0.0.1:LONGPOLLING_PORT_PLACEHOLDER;
+}
+
+# HTTP -> HTTPS redirect (uncomment if SSL is enabled)
+# server {
+#     listen 80;
+#     server_name WEBSITE_NAME_PLACEHOLDER;
+#     return 301 https://$host$request_uri;
+# }
+
 server {
     listen 80;
-    server_name $WEBSITE_NAME;
+    server_name WEBSITE_NAME_PLACEHOLDER;
 
-    # Proxy headers for Odoo
-    proxy_set_header X-Forwarded-Host \$host;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header X-Real-IP \$remote_addr;
+    # Proxy headers
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+
+    # Security headers
     add_header X-Frame-Options "SAMEORIGIN";
     add_header X-XSS-Protection "1; mode=block";
-    proxy_set_header X-Client-IP \$remote_addr;
-    proxy_set_header HTTP_X_FORWARDED_HOST \$remote_addr;
+    add_header X-Content-Type-Options "nosniff";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains";
 
     # Log files
-    access_log /var/log/nginx/$OE_USER-access.log;
-    error_log  /var/log/nginx/$OE_USER-error.log;
+    access_log /var/log/nginx/OE_USER_PLACEHOLDER-access.log;
+    error_log  /var/log/nginx/OE_USER_PLACEHOLDER-error.log;
 
     # Proxy buffers
     proxy_buffers 16 64k;
     proxy_buffer_size 128k;
 
-    proxy_read_timeout 900s;
-    proxy_connect_timeout 900s;
-    proxy_send_timeout 900s;
+    # Timeouts
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
 
     # Backend failover
     proxy_next_upstream error timeout invalid_header http_500 http_502 http_503;
@@ -555,43 +637,73 @@ server {
     gzip_buffers 4 32k;
     gzip_types text/css text/less text/plain text/xml application/xml application/json application/javascript application/pdf image/jpeg image/png;
     gzip_vary on;
+
+    # Request limits
     client_header_buffer_size 4k;
     large_client_header_buffers 4 64k;
     client_max_body_size 0;
 
-    location / {
-        proxy_pass http://127.0.0.1:$OE_PORT;
-        proxy_redirect off;
+    # Websocket support (Odoo 19 uses /websocket instead of /longpolling)
+    location /websocket {
+        proxy_pass http://odoo-websocket;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 86400;
     }
 
+    # Longpolling fallback (for older clients)
     location /longpolling {
-        proxy_pass http://127.0.0.1:$LONGPOLLING_PORT;
+        proxy_pass http://odoo-websocket;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
     }
 
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico)\$ {
-        expires 2d;
-        proxy_pass http://127.0.0.1:$OE_PORT;
-        add_header Cache-Control "public, no-transform";
-    }
-
-    # Cache static data
-    location ~ /[a-zA-Z0-9_-]*/static/ {
+    # Static files with caching
+    location ~* /web/static/ {
         proxy_cache_valid 200 302 60m;
         proxy_cache_valid 404 1m;
         proxy_buffering on;
         expires 864000;
-        proxy_pass http://127.0.0.1:$OE_PORT;
+        proxy_pass http://odoo;
+    }
+
+    # Asset files with cache headers
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 2d;
+        proxy_pass http://odoo;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # All other requests go to Odoo
+    location / {
+        proxy_pass http://odoo;
+        proxy_redirect off;
     }
 }
-EOF
+
+# Required for websocket upgrade
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+NGINXEOF
+
+    # Replace placeholders with actual values
+    sudo sed -i "s/OE_PORT_PLACEHOLDER/$OE_PORT/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
+    sudo sed -i "s/LONGPOLLING_PORT_PLACEHOLDER/$LONGPOLLING_PORT/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
+    sudo sed -i "s/WEBSITE_NAME_PLACEHOLDER/$WEBSITE_NAME/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
+    sudo sed -i "s/OE_USER_PLACEHOLDER/$OE_USER/g" /etc/nginx/conf.d/${OE_CONFIG}.conf
 
     # On RHEL, Nginx uses conf.d/ instead of sites-available/sites-enabled
     sudo systemctl enable nginx
     sudo systemctl start nginx
     sudo systemctl reload nginx
-
-    # Add proxy_mode to Odoo config
-    sudo bash -c "echo 'proxy_mode = True' >> /etc/${OE_CONFIG}.conf"
 
     echo "Nginx configured. File: /etc/nginx/conf.d/${OE_CONFIG}.conf"
 else
@@ -628,10 +740,20 @@ echo " Odoo 19 Installation Complete on RHEL 10!"
 echo "============================================================"
 echo ""
 echo " Port:                  $OE_PORT"
+echo " Longpolling port:      $LONGPOLLING_PORT"
+echo " Workers:               $WORKERS"
 echo " Service user:          $OE_USER"
 echo " Config file:           /etc/${OE_CONFIG}.conf"
 echo " Log file:              /var/log/$OE_USER/${OE_CONFIG}.log"
+echo ""
+if [ "$POSTGRESQL_MODE" = "local" ]; then
+echo " PostgreSQL:            local (postgresql-17)"
 echo " PostgreSQL user:       $OE_USER"
+else
+echo " PostgreSQL:            remote (${DB_HOST}:${DB_PORT})"
+echo " DB user:               $DB_USER"
+fi
+echo ""
 echo " Code location:         $OE_HOME_EXT"
 if [ "$IS_ENTERPRISE" = "True" ]; then
 echo " Enterprise addons:     $OE_HOME/enterprise/addons"
