@@ -177,9 +177,9 @@ CREATE EXTENSION IF NOT EXISTS vector;
 SQL
     fi
 
-    # Add psql to PATH for convenience
+    # Add psql/pg_config to PATH for this session and future logins
     echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
-    source /etc/profile.d/postgresql17.sh 2>/dev/null || true
+    export PATH=/usr/pgsql-17/bin:$PATH
 
 else
     echo -e "\n---- Installing default PostgreSQL from RHEL AppStream ----"
@@ -351,12 +351,12 @@ if [ "$IS_ENTERPRISE" = "True" ]; then
     sudo npm install -g less-plugin-clean-css
 fi
 
+echo -e "\n---- Setting permissions on home folder ----"
+sudo chown -R $OE_USER:$OE_USER $OE_HOME/
+
 echo -e "\n---- Create custom module directory ----"
 sudo su $OE_USER -c "mkdir -p $OE_HOME/custom"
 sudo su $OE_USER -c "mkdir -p $OE_HOME/custom/addons"
-
-echo -e "\n---- Setting permissions on home folder ----"
-sudo chown -R $OE_USER:$OE_USER $OE_HOME/*
 
 #--------------------------------------------------
 # Create server config file
