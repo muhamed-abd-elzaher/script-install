@@ -62,11 +62,12 @@ ADMIN_EMAIL="odoo@example.com"
 #==================================================
 
 # pip install with --break-system-packages if supported (PEP 668 on RHEL 10 / Python 3.12)
+# Uses sudo -E to preserve PATH (needed for pg_config when building psycopg2)
 pip_install() {
   if pip3 help install 2>/dev/null | grep -q -- '--break-system-packages'; then
-    sudo -H pip3 install --break-system-packages "$@"
+    sudo -H -E pip3 install --break-system-packages "$@"
   else
-    sudo -H pip3 install "$@"
+    sudo -H -E pip3 install "$@"
   fi
 }
 
@@ -323,7 +324,12 @@ sudo chown $OE_USER:$OE_USER /var/log/$OE_USER
 # Install ODOO 19
 #--------------------------------------------------
 echo -e "\n==== Installing ODOO 19 Server ===="
-sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/odoo $OE_HOME_EXT/
+if [ -d "$OE_HOME_EXT/.git" ]; then
+    echo "---- Odoo source already exists, pulling latest changes ----"
+    sudo git -C $OE_HOME_EXT pull
+else
+    sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/odoo $OE_HOME_EXT/
+fi
 
 if [ "$IS_ENTERPRISE" = "True" ]; then
     # Odoo Enterprise install!
@@ -331,18 +337,23 @@ if [ "$IS_ENTERPRISE" = "True" ]; then
     sudo su $OE_USER -c "mkdir -p $OE_HOME/enterprise"
     sudo su $OE_USER -c "mkdir -p $OE_HOME/enterprise/addons"
 
-    GITHUB_RESPONSE=$(sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/enterprise "$OE_HOME/enterprise/addons" 2>&1)
-    while [[ $GITHUB_RESPONSE == *"Authentication"* ]]; do
-        echo "-----------------------------------------------------------"
-        echo "WARNING: GitHub authentication failed! Please try again."
-        echo ""
-        echo "To clone Odoo Enterprise you need to be an official Odoo"
-        echo "partner with access to: https://github.com/odoo/enterprise"
-        echo ""
-        echo "TIP: Press Ctrl+C to stop this script."
-        echo "-----------------------------------------------------------"
+    if [ -d "$OE_HOME/enterprise/addons/.git" ]; then
+        echo "---- Enterprise source already exists, pulling latest changes ----"
+        sudo git -C "$OE_HOME/enterprise/addons" pull
+    else
         GITHUB_RESPONSE=$(sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/enterprise "$OE_HOME/enterprise/addons" 2>&1)
-    done
+        while [[ $GITHUB_RESPONSE == *"Authentication"* ]]; do
+            echo "-----------------------------------------------------------"
+            echo "WARNING: GitHub authentication failed! Please try again."
+            echo ""
+            echo "To clone Odoo Enterprise you need to be an official Odoo"
+            echo "partner with access to: https://github.com/odoo/enterprise"
+            echo ""
+            echo "TIP: Press Ctrl+C to stop this script."
+            echo "-----------------------------------------------------------"
+            GITHUB_RESPONSE=$(sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/enterprise "$OE_HOME/enterprise/addons" 2>&1)
+        done
+    fi
 
     echo -e "\n---- Enterprise code installed under $OE_HOME/enterprise/addons ----"
     echo -e "\n---- Installing Enterprise-specific libraries ----"
