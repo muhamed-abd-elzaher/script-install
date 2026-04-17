@@ -62,12 +62,12 @@ ADMIN_EMAIL="odoo@example.com"
 #==================================================
 
 # pip install with --break-system-packages if supported (PEP 668 on RHEL 10 / Python 3.12)
-# Uses sudo -E to preserve PATH (needed for pg_config when building psycopg2)
+# Uses sudo PATH=$PATH to explicitly pass PATH (needed for pg_config when building psycopg2)
 pip_install() {
   if pip3 help install 2>/dev/null | grep -q -- '--break-system-packages'; then
-    sudo -H -E pip3 install --break-system-packages "$@"
+    sudo -H PATH="$PATH" pip3 install --break-system-packages "$@"
   else
-    sudo -H -E pip3 install "$@"
+    sudo -H PATH="$PATH" pip3 install "$@"
   fi
 }
 
@@ -324,6 +324,10 @@ sudo chown $OE_USER:$OE_USER /var/log/$OE_USER
 # Install ODOO 19
 #--------------------------------------------------
 echo -e "\n==== Installing ODOO 19 Server ===="
+# Mark directories as safe for git (needed when re-running script with different user)
+sudo git config --global --add safe.directory $OE_HOME_EXT
+sudo git config --global --add safe.directory "$OE_HOME/enterprise/addons"
+
 if [ -d "$OE_HOME_EXT/.git" ]; then
     echo "---- Odoo source already exists, pulling latest changes ----"
     sudo git -C $OE_HOME_EXT pull
