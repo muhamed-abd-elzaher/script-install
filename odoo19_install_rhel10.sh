@@ -16,9 +16,15 @@
 # CONFIGURABLE PARAMETERS
 #==================================================
 
-OE_USER="odoo"
-OE_HOME="/$OE_USER"
-OE_HOME_EXT="/$OE_USER/${OE_USER}-server"
+OE_USER="odooapp"
+OE_HOME="/opt/odoo"
+OE_HOME_EXT="/opt/odoo/odoo-server"
+# Path to manually uploaded Odoo source (used when GitHub is blocked).
+# Can be a zip (/tmp/odoo-19.0.zip) or an already-extracted folder.
+# Leave empty to attempt git clone from GitHub.
+OE_LOCAL_SOURCE="/tmp/odoo-19.0.zip"
+# Path to manually uploaded requirements.txt (used when GitHub is blocked).
+OE_LOCAL_REQUIREMENTS="/tmp/requirements.txt"
 
 # Set to True to install wkhtmltopdf, False if already installed or if
 # the server can't reach github.com (corporate proxy environments)
@@ -313,7 +319,18 @@ dnf_install \
 dnf_install libzip-devel 2>/dev/null || echo "WARN: libzip-devel not available (needs CRB/EPEL). Skipping — not required for core Odoo."
 
 echo -e "\n---- Install Python packages / Odoo 19 requirements ----"
-pip_install -r "https://github.com/odoo/odoo/raw/${OE_VERSION}/requirements.txt"
+# Try local requirements.txt first (when GitHub is blocked)
+if [ -f "$OE_LOCAL_REQUIREMENTS" ]; then
+    echo "Using local requirements file: $OE_LOCAL_REQUIREMENTS"
+    pip_install -r "$OE_LOCAL_REQUIREMENTS"
+elif [ -f "$OE_HOME_EXT/requirements.txt" ]; then
+    echo "Using requirements.txt from Odoo source"
+    pip_install -r "$OE_HOME_EXT/requirements.txt"
+else
+    echo "Downloading requirements.txt from GitHub"
+    pip_install -r "https://github.com/odoo/odoo/raw/${OE_VERSION}/requirements.txt" || \
+        { echo "ERROR: Cannot download requirements.txt. Upload it to $OE_LOCAL_REQUIREMENTS"; exit 1; }
+fi
 
 # Ensure phonenumbers is installed
 pip_install phonenumbers
@@ -396,11 +413,20 @@ else
 fi
 
 #--------------------------------------------------
-# Create ODOO system user
+# Create ODOO system user (skip if already exists)
 #--------------------------------------------------
-echo -e "\n---- Create ODOO system user ----"
-sudo adduser --system --shell=/bin/bash --home-dir=$OE_HOME --user-group $OE_USER 2>/dev/null || \
-sudo useradd --system --shell /bin/bash --home-dir $OE_HOME --create-home --user-group $OE_USER 2>/dev/null || true
+if id "$OE_USER" >/dev/null 2>&1; then
+    echo -e "\n---- User '$OE_USER' already exists, skipping user creation ----"
+else
+    echo -e "\n---- Creating ODOO system user '$OE_USER' ----"
+    sudo adduser --system --shell=/bin/bash --home-dir=$OE_HOME --user-group $OE_USER 2>/dev/null || \
+    sudo useradd --system --shell /bin/bash --home-dir $OE_HOME --create-home --user-group $OE_USER 2>/dev/null || \
+    { echo "ERROR: Could not create user $OE_USER. Create it manually or set OE_USER to an existing user."; exit 1; }
+fi
+
+# Ensure OE_HOME exists and is owned by OE_USER (covers case where user existed before)
+sudo mkdir -p $OE_HOME
+sudo chown $OE_USER:$OE_USER $OE_HOME
 
 echo -e "\n---- Create Log directory ----"
 sudo mkdir -p /var/log/$OE_USER
@@ -410,21 +436,42 @@ sudo chown $OE_USER:$OE_USER /var/log/$OE_USER
 # Install ODOO 19
 #--------------------------------------------------
 echo -e "\n==== Installing ODOO 19 Server ===="
-# Mark directories as safe for git (needed when re-running script with different user)
-sudo git config --global --add safe.directory $OE_HOME_EXT
-sudo git config --global --add safe.directory "$OE_HOME/enterprise/addons"
 
-# Pass proxy env to root's git config (sudo strips proxy vars by default)
-if [ -n "$http_proxy" ]; then
-    sudo git config --global http.proxy "$http_proxy"
-    sudo git config --global https.proxy "${https_proxy:-$http_proxy}"
-fi
-
-if [ -d "$OE_HOME_EXT/.git" ]; then
-    echo "---- Odoo source already exists, pulling latest changes ----"
-    sudo git -C $OE_HOME_EXT pull
+if [ -f "$OE_HOME_EXT/odoo-bin" ]; then
+    echo "---- Odoo source already installed at $OE_HOME_EXT, skipping ----"
+elif [ -n "$OE_LOCAL_SOURCE" ] && [ -f "$OE_LOCAL_SOURCE" ]; then
+    echo "---- Extracting Odoo source from $OE_LOCAL_SOURCE ----"
+    dnf_install unzip 2>/dev/null || true
+    sudo mkdir -p $OE_HOME_EXT
+    # Extract to a tmp dir and move contents to avoid double-nesting
+    TMP_EXTRACT=$(mktemp -d)
+    sudo unzip -q "$OE_LOCAL_SOURCE" -d "$TMP_EXTRACT"
+    # GitHub zips contain a single top-level folder like odoo-19.0/
+    INNER_DIR=$(sudo find "$TMP_EXTRACT" -maxdepth 1 -mindepth 1 -type d | head -n 1)
+    if [ -n "$INNER_DIR" ]; then
+        sudo cp -a "$INNER_DIR"/. "$OE_HOME_EXT/"
+    fi
+    sudo rm -rf "$TMP_EXTRACT"
+    echo "---- Odoo source extracted to $OE_HOME_EXT ----"
 else
-    sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/odoo $OE_HOME_EXT/
+    echo "---- No local source provided, attempting git clone from GitHub ----"
+    sudo git config --global --add safe.directory $OE_HOME_EXT
+    sudo git config --global --add safe.directory "$OE_HOME/enterprise/addons"
+    if [ -n "$http_proxy" ]; then
+        sudo git config --global http.proxy "$http_proxy"
+        sudo git config --global https.proxy "${https_proxy:-$http_proxy}"
+    fi
+
+    if [ -d "$OE_HOME_EXT/.git" ]; then
+        echo "---- Odoo git repo exists, pulling latest changes ----"
+        sudo git -C $OE_HOME_EXT pull
+    else
+        sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/odoo $OE_HOME_EXT/ || \
+            { echo "ERROR: Cannot clone from GitHub and no local source at $OE_LOCAL_SOURCE."; \
+              echo "       Download https://github.com/odoo/odoo/archive/refs/heads/19.0.zip"; \
+              echo "       and upload to $OE_LOCAL_SOURCE, then re-run this script."; \
+              exit 1; }
+    fi
 fi
 
 if [ "$IS_ENTERPRISE" = "True" ]; then
