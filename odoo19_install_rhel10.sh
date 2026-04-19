@@ -26,6 +26,22 @@ OE_LOCAL_SOURCE="/tmp/odoo-19.0.zip"
 # Path to manually uploaded requirements.txt (used when GitHub is blocked).
 OE_LOCAL_REQUIREMENTS="/tmp/requirements.txt"
 
+# OFFLINE MODE: pre-downloaded packages for airgapped / proxy-blocked environments
+# Leave empty to use online sources (PyPI, PGDG, npm).
+# When set, these folders MUST contain the required files.
+#
+# Python wheels: create on another machine with
+#   pip download -r requirements.txt -d /tmp/pip-packages/
+#   tar czf pip-packages.tar.gz pip-packages/
+# Then upload and extract to /tmp/pip-packages/
+PIP_LOCAL_DIR="/tmp/pip-packages"
+
+# PostgreSQL 17 RPMs: download all from
+#   https://download.postgresql.org/pub/repos/yum/17/redhat/rhel-10-x86_64/
+# (need at least postgresql17, postgresql17-libs, postgresql17-server,
+#  postgresql17-contrib, postgresql17-devel and their deps)
+PG17_LOCAL_DIR="/tmp/pg17-rpms"
+
 # Set to True to install wkhtmltopdf.
 # If github.com is blocked, upload the RPM manually to /tmp/wkhtmltox.rpm
 # Download from: https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox-0.12.6.1-3.almalinux9.x86_64.rpm
@@ -95,19 +111,30 @@ ADMIN_EMAIL="odoo@example.com"
 # HELPER FUNCTIONS
 #==================================================
 
-# pip install with --break-system-packages if supported (PEP 668 on RHEL 10 / Python 3.12)
-# Preserves proxy env vars so pip can download packages through corporate proxy
+# pip install:
+# - If PIP_LOCAL_DIR exists and has wheels, use offline mode (no network)
+# - Otherwise use PyPI (preserving proxy env vars)
+# - --break-system-packages handles PEP 668 on RHEL 10 / Python 3.12
 pip_install() {
+  local BREAK_FLAG=""
+  if pip3 help install 2>/dev/null | grep -q -- '--break-system-packages'; then
+    BREAK_FLAG="--break-system-packages"
+  fi
+
+  # Offline mode: use local wheels
+  if [ -n "$PIP_LOCAL_DIR" ] && [ -d "$PIP_LOCAL_DIR" ] && \
+     [ "$(ls -A "$PIP_LOCAL_DIR" 2>/dev/null)" ]; then
+    echo "pip_install: using offline wheels from $PIP_LOCAL_DIR"
+    sudo -H pip3 install $BREAK_FLAG --no-index --find-links="$PIP_LOCAL_DIR" "$@"
+    return $?
+  fi
+
+  # Online mode: preserve proxy env vars through sudo
   local PIP_ENV=""
   [ -n "$http_proxy" ]  && PIP_ENV="$PIP_ENV http_proxy=$http_proxy"
   [ -n "$https_proxy" ] && PIP_ENV="$PIP_ENV https_proxy=$https_proxy"
   [ -n "$no_proxy" ]    && PIP_ENV="$PIP_ENV no_proxy=$no_proxy"
-
-  if pip3 help install 2>/dev/null | grep -q -- '--break-system-packages'; then
-    sudo -H env $PIP_ENV pip3 install --break-system-packages "$@"
-  else
-    sudo -H env $PIP_ENV pip3 install "$@"
-  fi
+  sudo -H env $PIP_ENV pip3 install $BREAK_FLAG "$@"
 }
 
 # dnf wrapper: use --nogpgcheck to work around stale/mismatched GPG keys on RHEL 10
@@ -185,6 +212,17 @@ for f in "$OE_LOCAL_SOURCE" "$OE_LOCAL_REQUIREMENTS" "/tmp/pgdg-redhat-repo-late
 done
 
 echo ""
+echo "Offline package directories (optional, for airgapped installs):"
+for d in "$PIP_LOCAL_DIR" "$PG17_LOCAL_DIR"; do
+    if [ -n "$d" ] && [ -d "$d" ] && [ "$(ls -A "$d" 2>/dev/null)" ]; then
+        count=$(ls -1 "$d" 2>/dev/null | wc -l)
+        echo "  [OK]    $d ($count files)"
+    else
+        echo "  [MISS]  $d (will use online sources)"
+    fi
+done
+
+echo ""
 echo "External connectivity:"
 check_url "PyPI (Python packages)"          "https://pypi.org/"
 check_url "files.pythonhosted.org"          "https://files.pythonhosted.org/"
@@ -242,7 +280,13 @@ echo -e "\n---- Install PostgreSQL 17 (mode: ${POSTGRESQL_MODE}) ----"
 #   2. Otherwise try to download from download.postgresql.org
 PGDG_AVAILABLE="False"
 
-if [ -f /tmp/pgdg-redhat-repo-latest.noarch.rpm ]; then
+# If offline PG17 RPMs are provided, skip PGDG repo setup entirely
+if [ -n "$PG17_LOCAL_DIR" ] && [ -d "$PG17_LOCAL_DIR" ] && \
+   [ "$(ls -A "$PG17_LOCAL_DIR" 2>/dev/null)" ]; then
+    echo "Using offline PG17 RPMs from $PG17_LOCAL_DIR - skipping PGDG repo setup"
+    sudo dnf -qy module disable postgresql 2>/dev/null || true
+    PGDG_AVAILABLE="Offline"
+elif [ -f /tmp/pgdg-redhat-repo-latest.noarch.rpm ]; then
     echo "Using locally provided PGDG RPM at /tmp/pgdg-redhat-repo-latest.noarch.rpm"
     sudo dnf install -y --nogpgcheck /tmp/pgdg-redhat-repo-latest.noarch.rpm 2>/dev/null \
         && PGDG_AVAILABLE="True"
@@ -256,30 +300,44 @@ if [ "$PGDG_AVAILABLE" = "True" ]; then
     sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
     sudo dnf -qy module disable postgresql 2>/dev/null || true
     sudo dnf clean all
-else
+elif [ "$PGDG_AVAILABLE" = "False" ]; then
     echo ""
     echo "======================================================"
-    echo "ERROR: PGDG repo not reachable and no local RPM found."
+    echo "ERROR: Cannot install PostgreSQL 17."
     echo "======================================================"
-    echo "PostgreSQL 17 requires the PGDG repository."
     echo ""
-    echo "Fix options:"
+    echo "You need ONE of these:"
     echo ""
-    echo " A) Configure proxy to allow download.postgresql.org, then re-run."
+    echo " A) Working network access to download.postgresql.org"
     echo ""
-    echo " B) Download the PGDG RPM manually on another machine, then:"
-    echo "    scp pgdg-redhat-repo-latest.noarch.rpm odooapp@this-server:/tmp/"
-    echo "    Then re-run this script."
+    echo " B) /tmp/pgdg-redhat-repo-latest.noarch.rpm uploaded manually"
+    echo "    (then still needs yum.postgresql.org access to download RPMs)"
     echo ""
-    echo "    Download URL:"
-    echo "    https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm"
+    echo " C) Pre-downloaded PG17 RPMs in $PG17_LOCAL_DIR (full offline mode)"
+    echo "    Download all RPMs from:"
+    echo "    https://download.postgresql.org/pub/repos/yum/17/redhat/rhel-10-x86_64/"
+    echo "    Needed: postgresql17, postgresql17-libs, postgresql17-server,"
+    echo "            postgresql17-contrib, postgresql17-devel"
     echo ""
     exit 1
 fi
 
+# Helper: install PG17 packages from offline dir or PGDG online
+install_pg17_packages() {
+    local pkgs="$*"
+    if [ -n "$PG17_LOCAL_DIR" ] && [ -d "$PG17_LOCAL_DIR" ] && \
+       [ "$(ls -A "$PG17_LOCAL_DIR" 2>/dev/null)" ]; then
+        echo "Installing PG17 packages from offline dir: $PG17_LOCAL_DIR"
+        sudo dnf install -y --nogpgcheck $PG17_LOCAL_DIR/*.rpm
+    else
+        echo "Installing PG17 packages from PGDG repo"
+        dnf_install $pkgs
+    fi
+}
+
 if [ "$POSTGRESQL_MODE" = "local" ]; then
-    echo -e "\n---- Installing PostgreSQL 17 Server locally (from PGDG) ----"
-    dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
+    echo -e "\n---- Installing PostgreSQL 17 Server locally ----"
+    install_pg17_packages postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
     sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
     sudo systemctl start postgresql-17
     sudo systemctl enable postgresql-17
@@ -305,7 +363,7 @@ SQL
 else
     # Remote PostgreSQL - only need client libs + devel for psycopg2 build
     echo -e "\n---- Installing PostgreSQL 17 client libs only (remote DB) ----"
-    dnf_install postgresql17-libs postgresql17-devel postgresql17
+    install_pg17_packages postgresql17-libs postgresql17-devel postgresql17
     PG_BIN_PATH="/usr/pgsql-17/bin"
 fi
 
