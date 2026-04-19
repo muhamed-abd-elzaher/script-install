@@ -26,9 +26,10 @@ OE_LOCAL_SOURCE="/tmp/odoo-19.0.zip"
 # Path to manually uploaded requirements.txt (used when GitHub is blocked).
 OE_LOCAL_REQUIREMENTS="/tmp/requirements.txt"
 
-# Set to True to install wkhtmltopdf, False if already installed or if
-# the server can't reach github.com (corporate proxy environments)
-INSTALL_WKHTMLTOPDF="False"
+# Set to True to install wkhtmltopdf.
+# If github.com is blocked, upload the RPM manually to /tmp/wkhtmltox.rpm
+# Download from: https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox-0.12.6.1-3.almalinux9.x86_64.rpm
+INSTALL_WKHTMLTOPDF="True"
 
 # Default Odoo port (use with -c /etc/odoo-server.conf)
 OE_PORT="8069"
@@ -377,9 +378,16 @@ if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
         WKHTML_RPM="https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox-0.12.6.1-3.almalinux9.aarch64.rpm"
     fi
 
-    if [ -n "$WKHTML_RPM" ]; then
-        echo -e "---- Downloading wkhtmltopdf RPM ----"
-        wget -q "$WKHTML_RPM" -O /tmp/wkhtmltox.rpm 2>/dev/null
+    # Check if a local RPM was uploaded manually (for GitHub-blocked environments)
+    LOCAL_WKHTML_RPM="/tmp/wkhtmltox.rpm"
+
+    if [ -f "$LOCAL_WKHTML_RPM" ] && [ -s "$LOCAL_WKHTML_RPM" ]; then
+        echo -e "---- Using locally uploaded wkhtmltopdf RPM: $LOCAL_WKHTML_RPM ----"
+        sudo dnf localinstall -y --nogpgcheck "$LOCAL_WKHTML_RPM" 2>/dev/null || \
+        sudo rpm -Uvh --nodeps "$LOCAL_WKHTML_RPM" 2>/dev/null || true
+    elif [ -n "$WKHTML_RPM" ]; then
+        echo -e "---- Downloading wkhtmltopdf RPM from GitHub ----"
+        timeout 30 curl -fsSL "$WKHTML_RPM" -o /tmp/wkhtmltox.rpm 2>/dev/null
 
         if [ -f /tmp/wkhtmltox.rpm ] && [ -s /tmp/wkhtmltox.rpm ]; then
             echo -e "---- Installing wkhtmltopdf RPM ----"
@@ -387,12 +395,17 @@ if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
             sudo rpm -Uvh --nodeps /tmp/wkhtmltox.rpm 2>/dev/null || true
             rm -f /tmp/wkhtmltox.rpm
         else
-            echo -e "---- Download failed. Trying dnf install... ----"
-            dnf_install wkhtmltopdf 2>/dev/null || true
+            echo ""
+            echo "WARNING: Could not download wkhtmltopdf (github.com may be blocked)."
+            echo "To install manually:"
+            echo "  1. On a machine with internet, download:"
+            echo "     $WKHTML_RPM"
+            echo "  2. Upload to this server at: $LOCAL_WKHTML_RPM"
+            echo "  3. Re-run this script, or run:"
+            echo "     sudo dnf localinstall -y --nogpgcheck $LOCAL_WKHTML_RPM"
         fi
     else
         echo -e "---- Unsupported architecture for wkhtmltopdf: $ARCH ----"
-        dnf_install wkhtmltopdf 2>/dev/null || true
     fi
 
     # Create symlinks if needed
