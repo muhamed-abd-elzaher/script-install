@@ -25,6 +25,9 @@ OE_HOME_EXT="/opt/odoo/odoo-server"
 OE_LOCAL_SOURCE="/tmp/odoo-19.0.zip"
 # Path to manually uploaded requirements.txt (used when GitHub is blocked).
 OE_LOCAL_REQUIREMENTS="/tmp/requirements.txt"
+# Path to manually uploaded Enterprise addons zip (only used if IS_ENTERPRISE=True).
+# Download from https://github.com/odoo/enterprise (requires partner access).
+OE_LOCAL_ENTERPRISE="/tmp/enterprise-19.0.zip"
 
 # OFFLINE MODE: pre-downloaded packages for airgapped / proxy-blocked environments
 # Leave empty to use online sources (PyPI, PGDG, npm).
@@ -188,7 +191,7 @@ echo "============================================================"
 # Preflight: check local uploaded files
 #--------------------------------------------------
 echo -e "\n---- Preflight: checking local uploaded files ----"
-for f in "$OE_LOCAL_SOURCE" "$OE_LOCAL_REQUIREMENTS" "/tmp/pgdg-redhat-repo-latest.noarch.rpm" "/tmp/wkhtmltox.rpm"; do
+for f in "$OE_LOCAL_SOURCE" "$OE_LOCAL_REQUIREMENTS" "$OE_LOCAL_ENTERPRISE" "/tmp/pgdg-redhat-repo-latest.noarch.rpm" "/tmp/wkhtmltox.rpm"; do
     if [ -f "$f" ]; then
         echo "  [OK]    $f ($(du -h "$f" | cut -f1))"
     else
@@ -529,32 +532,42 @@ fi
 if [ "$IS_ENTERPRISE" = "True" ]; then
     # Odoo Enterprise install!
     pip_install psycopg2-binary pdfminer.six
-    sudo su $OE_USER -c "mkdir -p $OE_HOME/enterprise"
-    sudo su $OE_USER -c "mkdir -p $OE_HOME/enterprise/addons"
+    sudo mkdir -p "$OE_HOME/enterprise/addons"
 
-    if [ -d "$OE_HOME/enterprise/addons/.git" ]; then
+    if [ -f "$OE_HOME/enterprise/addons/__manifest__.py" ] || \
+       [ "$(ls -A "$OE_HOME/enterprise/addons" 2>/dev/null | grep -v '^$')" ]; then
+        echo "---- Enterprise addons already present, skipping ----"
+    elif [ -n "$OE_LOCAL_ENTERPRISE" ] && [ -f "$OE_LOCAL_ENTERPRISE" ]; then
+        echo "---- Extracting Enterprise addons from $OE_LOCAL_ENTERPRISE ----"
+        dnf_install unzip 2>/dev/null || true
+        TMP_EXTRACT=$(mktemp -d)
+        sudo unzip -q "$OE_LOCAL_ENTERPRISE" -d "$TMP_EXTRACT"
+        # GitHub zips contain a single top-level folder like enterprise-19.0/
+        INNER_DIR=$(sudo find "$TMP_EXTRACT" -maxdepth 1 -mindepth 1 -type d | head -n 1)
+        if [ -n "$INNER_DIR" ]; then
+            sudo cp -a "$INNER_DIR"/. "$OE_HOME/enterprise/addons/"
+        fi
+        sudo rm -rf "$TMP_EXTRACT"
+        echo "---- Enterprise addons extracted to $OE_HOME/enterprise/addons ----"
+    elif [ -d "$OE_HOME/enterprise/addons/.git" ]; then
         echo "---- Enterprise source already exists, pulling latest changes ----"
         sudo git -C "$OE_HOME/enterprise/addons" pull
     else
+        echo "---- No local enterprise zip, attempting git clone from GitHub ----"
         GITHUB_RESPONSE=$(sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/enterprise "$OE_HOME/enterprise/addons" 2>&1)
-        while [[ $GITHUB_RESPONSE == *"Authentication"* ]]; do
-            echo "-----------------------------------------------------------"
-            echo "WARNING: GitHub authentication failed! Please try again."
-            echo ""
-            echo "To clone Odoo Enterprise you need to be an official Odoo"
-            echo "partner with access to: https://github.com/odoo/enterprise"
-            echo ""
-            echo "TIP: Press Ctrl+C to stop this script."
-            echo "-----------------------------------------------------------"
-            GITHUB_RESPONSE=$(sudo git clone --depth 1 --branch $OE_VERSION https://www.github.com/odoo/enterprise "$OE_HOME/enterprise/addons" 2>&1)
-        done
+        if [[ $GITHUB_RESPONSE == *"Authentication"* ]] || [[ $GITHUB_RESPONSE == *"could not resolve"* ]]; then
+            echo "ERROR: Cannot clone Enterprise repo and no local zip found."
+            echo "       Upload enterprise-19.0.zip to $OE_LOCAL_ENTERPRISE"
+            echo "       (requires https://github.com/odoo/enterprise partner access to download)"
+            exit 1
+        fi
     fi
 
     echo -e "\n---- Enterprise code installed under $OE_HOME/enterprise/addons ----"
     echo -e "\n---- Installing Enterprise-specific libraries ----"
     pip_install num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
-    sudo npm install -g less
-    sudo npm install -g less-plugin-clean-css
+    timeout 60 sudo npm install -g less 2>/dev/null || echo "WARN: npm install less failed"
+    timeout 60 sudo npm install -g less-plugin-clean-css 2>/dev/null || echo "WARN: npm install less-plugin-clean-css failed"
 fi
 
 echo -e "\n---- Setting permissions on home folder ----"
