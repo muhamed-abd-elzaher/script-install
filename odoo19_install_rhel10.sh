@@ -64,7 +64,7 @@ OE_VERSION="19.0"
 
 # Set to True to install Odoo Enterprise edition
 # You MUST have access to https://github.com/odoo/enterprise (Odoo Partner)
-IS_ENTERPRISE="False"
+IS_ENTERPRISE="True"
 
 # PostgreSQL configuration
 # Set to "local" to install PostgreSQL 17 server locally
