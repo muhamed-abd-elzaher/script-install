@@ -239,87 +239,74 @@ sudo dnf config-manager --set-enabled codeready-builder-for-rhel-${RHEL_VERSION}
 sudo subscription-manager repos --enable codeready-builder-for-rhel-${RHEL_VERSION}-${ARCH}-rpms 2>/dev/null || true
 
 #--------------------------------------------------
-# Install PostgreSQL 17
+# Install PostgreSQL
 #--------------------------------------------------
-echo -e "\n---- Install PostgreSQL 17 (mode: ${POSTGRESQL_MODE}) ----"
+echo -e "\n---- Install PostgreSQL (mode: ${POSTGRESQL_MODE}) ----"
 
-# Try to set up PGDG repo:
-#   1. Check if a local RPM exists (for proxy-blocked environments)
-#   2. Otherwise try to download from download.postgresql.org
-PGDG_AVAILABLE="False"
+if [ "$POSTGRESQL_MODE" = "remote" ]; then
+    # REMOTE MODE: only need client libs for psycopg2.
+    # libpq is wire-compatible across versions, so RHEL AppStream postgresql
+    # (v16) works fine with a PG17 server. No need for PGDG repo.
+    echo "---- Installing PostgreSQL client libs from RHEL AppStream ----"
+    echo "(libpq is wire-compatible; works with PG17 server on remote machine)"
+    dnf_install postgresql postgresql-server-devel libpq libpq-devel
 
-# If offline PG17 RPMs are provided, skip PGDG repo setup entirely
-if [ -n "$PG17_LOCAL_DIR" ] && [ -d "$PG17_LOCAL_DIR" ] && \
-   [ "$(ls -A "$PG17_LOCAL_DIR" 2>/dev/null)" ]; then
-    echo "Using offline PG17 RPMs from $PG17_LOCAL_DIR - skipping PGDG repo setup"
-    sudo dnf -qy module disable postgresql 2>/dev/null || true
-    PGDG_AVAILABLE="Offline"
-elif [ -f /tmp/pgdg-redhat-repo-latest.noarch.rpm ]; then
-    echo "Using locally provided PGDG RPM at /tmp/pgdg-redhat-repo-latest.noarch.rpm"
-    sudo dnf install -y --nogpgcheck /tmp/pgdg-redhat-repo-latest.noarch.rpm 2>/dev/null \
-        && PGDG_AVAILABLE="True"
+    # pg_config is already in /usr/bin with RHEL packages, just verify
+    which pg_config >/dev/null 2>&1 || echo "WARN: pg_config not in PATH. psycopg2 build will fail."
+
 else
-    timeout 15 sudo dnf install -y --nogpgcheck \
-      https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
-      2>/dev/null && PGDG_AVAILABLE="True"
-fi
+    # LOCAL MODE: install PostgreSQL 17 server via PGDG
+    PGDG_AVAILABLE="False"
 
-if [ "$PGDG_AVAILABLE" = "True" ]; then
-    sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
-    sudo dnf -qy module disable postgresql 2>/dev/null || true
-    sudo dnf clean all
-elif [ "$PGDG_AVAILABLE" = "False" ]; then
-    echo ""
-    echo "======================================================"
-    echo "ERROR: Cannot install PostgreSQL 17."
-    echo "======================================================"
-    echo ""
-    echo "You need ONE of these:"
-    echo ""
-    echo " A) Working network access to download.postgresql.org"
-    echo ""
-    echo " B) /tmp/pgdg-redhat-repo-latest.noarch.rpm uploaded manually"
-    echo "    (then still needs yum.postgresql.org access to download RPMs)"
-    echo ""
-    echo " C) Pre-downloaded PG17 RPMs in $PG17_LOCAL_DIR (full offline mode)"
-    echo "    Download all RPMs from:"
-    echo "    https://download.postgresql.org/pub/repos/yum/17/redhat/rhel-10-x86_64/"
-    echo "    Needed: postgresql17, postgresql17-libs, postgresql17-server,"
-    echo "            postgresql17-contrib, postgresql17-devel"
-    echo ""
-    exit 1
-fi
-
-# Helper: install PG17 packages from offline dir or PGDG online
-install_pg17_packages() {
-    local pkgs="$*"
+    # Option 1: Use pre-downloaded PG17 RPMs (full offline)
     if [ -n "$PG17_LOCAL_DIR" ] && [ -d "$PG17_LOCAL_DIR" ] && \
        [ "$(ls -A "$PG17_LOCAL_DIR" 2>/dev/null)" ]; then
-        echo "Installing PG17 packages from offline dir: $PG17_LOCAL_DIR"
+        echo "Using offline PG17 RPMs from $PG17_LOCAL_DIR"
+        sudo dnf -qy module disable postgresql 2>/dev/null || true
+        PGDG_AVAILABLE="Offline"
+    # Option 2: Local PGDG repo RPM uploaded
+    elif [ -f /tmp/pgdg-redhat-repo-latest.noarch.rpm ]; then
+        echo "Using locally uploaded PGDG repo RPM"
+        sudo dnf install -y --nogpgcheck /tmp/pgdg-redhat-repo-latest.noarch.rpm 2>/dev/null \
+            && PGDG_AVAILABLE="True"
+    # Option 3: Download PGDG repo RPM from online
+    else
+        timeout 15 sudo dnf install -y --nogpgcheck \
+          https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
+          2>/dev/null && PGDG_AVAILABLE="True"
+    fi
+
+    if [ "$PGDG_AVAILABLE" = "True" ]; then
+        sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
+        sudo dnf -qy module disable postgresql 2>/dev/null || true
+        sudo dnf clean all
+    elif [ "$PGDG_AVAILABLE" = "False" ]; then
+        echo ""
+        echo "ERROR: Cannot install PostgreSQL 17 locally."
+        echo "Either:"
+        echo "  - Switch to POSTGRESQL_MODE=\"remote\" (if DB is elsewhere)"
+        echo "  - Or provide pre-downloaded RPMs in $PG17_LOCAL_DIR"
+        echo "  - Or allow access to download.postgresql.org"
+        exit 1
+    fi
+
+    # Install PG17 server packages
+    if [ "$PGDG_AVAILABLE" = "Offline" ]; then
         sudo dnf install -y --nogpgcheck $PG17_LOCAL_DIR/*.rpm
     else
-        echo "Installing PG17 packages from PGDG repo"
-        dnf_install $pkgs
+        dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
     fi
-}
 
-if [ "$POSTGRESQL_MODE" = "local" ]; then
-    echo -e "\n---- Installing PostgreSQL 17 Server locally ----"
-    install_pg17_packages postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
+    # Initialize and start
+    echo -e "\n---- Initializing PostgreSQL 17 ----"
     sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
     sudo systemctl start postgresql-17
     sudo systemctl enable postgresql-17
-    PG_BIN_PATH="/usr/pgsql-17/bin"
 
-    if [ "$IS_ENTERPRISE" = "True" ]; then
-        # pgvector is needed for Enterprise AI features
+    if [ "$IS_ENTERPRISE" = "True" ] && [ "$PGDG_AVAILABLE" = "True" ]; then
         echo -e "\n---- Installing pgvector for Enterprise AI features ----"
         dnf_install pgvector_17 2>/dev/null || true
-
-        # Wait for PostgreSQL to be ready
         until sudo -u postgres pg_isready >/dev/null 2>&1; do sleep 1; done
-
-        # Create vector extension
         sudo -u postgres psql -v ON_ERROR_STOP=1 -d template1 <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector;
 SQL
@@ -328,25 +315,12 @@ SQL
     echo -e "\n---- Creating the ODOO PostgreSQL User ----"
     sudo su - postgres -c "createuser -s $OE_USER" 2>/dev/null || true
 
-else
-    # Remote PostgreSQL - only need client libs + devel for psycopg2 build
-    echo -e "\n---- Installing PostgreSQL 17 client libs only (remote DB) ----"
-    install_pg17_packages postgresql17-libs postgresql17-devel postgresql17
-    PG_BIN_PATH="/usr/pgsql-17/bin"
+    # Add PG17 to PATH and symlink pg_config
+    echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
+    export PATH=/usr/pgsql-17/bin:$PATH
+    sudo ln -sf /usr/pgsql-17/bin/pg_config /usr/bin/pg_config
+    sudo ln -sf /usr/pgsql-17/bin/psql /usr/bin/psql
 fi
-
-# Add psql/pg_config to PATH and ensure symlinks exist
-if [ "$PG_BIN_PATH" != "/usr/bin" ]; then
-    echo "export PATH=${PG_BIN_PATH}:\$PATH" | sudo tee /etc/profile.d/postgresql.sh
-    export PATH=${PG_BIN_PATH}:$PATH
-
-    # Create symlinks so pg_config is always findable (even inside sudo)
-    [ -f "${PG_BIN_PATH}/pg_config" ] && sudo ln -sf ${PG_BIN_PATH}/pg_config /usr/bin/pg_config
-    [ -f "${PG_BIN_PATH}/psql" ] && sudo ln -sf ${PG_BIN_PATH}/psql /usr/bin/psql
-fi
-
-# Verify pg_config is findable
-which pg_config >/dev/null 2>&1 || echo "WARN: pg_config not in PATH. psycopg2 build will fail."
 
 #--------------------------------------------------
 # Install System Dependencies
