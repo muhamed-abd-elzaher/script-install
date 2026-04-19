@@ -45,6 +45,12 @@ PIP_LOCAL_DIR="/tmp/pip-packages"
 #  postgresql17-contrib, postgresql17-devel and their deps)
 PG17_LOCAL_DIR="/tmp/pg17-rpms"
 
+# Generic RPMs folder: put ANY extra RPMs here that the script needs
+# but can't install via dnf (EPEL packages, optional -devel packages, etc).
+# Script will install any *.rpm in this folder at the start.
+# Examples: libzip-devel, wkhtmltox, python3-devel (from EPEL or downloaded RPMs)
+LOCAL_RPMS_DIR="/tmp/rpms"
+
 # Set to True to install wkhtmltopdf.
 # If github.com is blocked, upload the RPM manually to /tmp/wkhtmltox.rpm
 # Download from: https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-3/wkhtmltox-0.12.6.1-3.almalinux9.x86_64.rpm
@@ -205,6 +211,19 @@ fi
 if [ -n "$PG17_LOCAL_DIR" ] && [ -d "$PG17_LOCAL_DIR" ] && [ "$(ls -A "$PG17_LOCAL_DIR" 2>/dev/null)" ]; then
     echo "  [OK]    $PG17_LOCAL_DIR ($(ls -1 "$PG17_LOCAL_DIR" | wc -l) files)"
 fi
+if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && [ "$(ls -A "$LOCAL_RPMS_DIR" 2>/dev/null | grep '\.rpm$')" ]; then
+    echo "  [OK]    $LOCAL_RPMS_DIR ($(ls -1 "$LOCAL_RPMS_DIR"/*.rpm 2>/dev/null | wc -l) RPMs)"
+fi
+
+#--------------------------------------------------
+# Install any locally uploaded RPMs first
+#--------------------------------------------------
+if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && \
+   [ "$(ls -A "$LOCAL_RPMS_DIR" 2>/dev/null | grep '\.rpm$')" ]; then
+    echo -e "\n---- Installing locally uploaded RPMs from $LOCAL_RPMS_DIR ----"
+    sudo dnf install -y --nogpgcheck "$LOCAL_RPMS_DIR"/*.rpm 2>&1 | tail -20 || \
+    sudo rpm -Uvh --force --nodeps "$LOCAL_RPMS_DIR"/*.rpm 2>&1 | tail -20 || true
+fi
 
 #--------------------------------------------------
 # Fix GPG Keys (RHEL 10 may have outdated/missing signing keys)
@@ -227,18 +246,25 @@ sudo dnf update -y --nogpgcheck
 dnf_install dnf-utils
 
 #--------------------------------------------------
-# Install EPEL Repository (needed for some dependencies)
+# Install EPEL Repository (optional - entirely skipped if unreachable)
 #--------------------------------------------------
-echo -e "\n---- Install EPEL Repository (optional, skipped behind proxy) ----"
-# EPEL is external and may be blocked by corporate proxy. Try but don't fail.
-timeout 15 sudo dnf install -y --nogpgcheck \
-  https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VERSION}.noarch.rpm \
-  2>/dev/null || timeout 15 sudo dnf install -y --nogpgcheck epel-release 2>/dev/null || \
-  echo "INFO: EPEL repo not installed (external mirror not reachable). Continuing without EPEL."
+echo -e "\n---- Install EPEL Repository (optional) ----"
+# Check if EPEL is already installed
+if rpm -q epel-release >/dev/null 2>&1; then
+    echo "EPEL already installed, skipping."
+# Check if user uploaded EPEL RPM to /tmp
+elif [ -f /tmp/epel-release.rpm ]; then
+    echo "Using locally uploaded EPEL RPM"
+    sudo dnf install -y --nogpgcheck /tmp/epel-release.rpm 2>/dev/null || true
+else
+    # Try online with short timeout - fail fast and silent
+    timeout 10 sudo dnf install -y --nogpgcheck \
+      https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VERSION}.noarch.rpm \
+      >/dev/null 2>&1 || echo "INFO: EPEL not installed (unreachable). Continuing without it."
+fi
 
-# Enable CodeReady Builder / CRB equivalent (needed for some -devel packages)
+# Enable CRB only if it exists (silent fail if not subscribed)
 sudo dnf config-manager --set-enabled crb 2>/dev/null || \
-sudo dnf config-manager --set-enabled codeready-builder-for-rhel-${RHEL_VERSION}-${ARCH}-rpms 2>/dev/null || \
 sudo subscription-manager repos --enable codeready-builder-for-rhel-${RHEL_VERSION}-${ARCH}-rpms 2>/dev/null || true
 
 #--------------------------------------------------
