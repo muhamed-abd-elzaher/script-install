@@ -120,10 +120,18 @@ detect_arch() {
 detect_arch
 
 # Auto-calculate workers if set to 0
+# Capped at MAX_WORKERS because each worker uses ~2GB RAM
+MAX_WORKERS=32
 if [ "$WORKERS" -eq 0 ]; then
     CPU_COUNT=$(nproc --all 2>/dev/null || echo 2)
     WORKERS=$(( CPU_COUNT * 2 + 1 ))
-    echo "Auto-detected $CPU_COUNT CPU cores, setting workers to $WORKERS"
+    if [ "$WORKERS" -gt "$MAX_WORKERS" ]; then
+        echo "Auto-detected $CPU_COUNT CPU cores. Formula (CPU*2+1)=$WORKERS exceeds cap of $MAX_WORKERS."
+        echo "Setting workers to $MAX_WORKERS (edit MAX_WORKERS to change)."
+        WORKERS=$MAX_WORKERS
+    else
+        echo "Auto-detected $CPU_COUNT CPU cores, setting workers to $WORKERS"
+    fi
 fi
 
 echo "============================================================"
@@ -157,10 +165,12 @@ dnf_install dnf-utils
 #--------------------------------------------------
 # Install EPEL Repository (needed for some dependencies)
 #--------------------------------------------------
-echo -e "\n---- Install EPEL Repository ----"
+echo -e "\n---- Install EPEL Repository (optional) ----"
+# EPEL is external and may be blocked by corporate proxy. Continue even if it fails.
 dnf_install \
   https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VERSION}.noarch.rpm \
-  2>/dev/null || dnf_install epel-release 2>/dev/null || true
+  2>/dev/null || dnf_install epel-release 2>/dev/null || \
+  echo "WARN: EPEL repo not available (proxy may be blocking dl.fedoraproject.org). Continuing without EPEL."
 
 # Enable CodeReady Builder / CRB equivalent (needed for some -devel packages)
 sudo dnf config-manager --set-enabled crb 2>/dev/null || \
@@ -232,6 +242,7 @@ echo -e "\n---- Installing Python 3 + pip3 ----"
 dnf_install python3 python3-pip python3-devel python3-setuptools python3-wheel
 
 echo -e "\n---- Installing system dependencies ----"
+# Core dependencies (always available in RHEL BaseOS + AppStream)
 dnf_install \
     git \
     gcc \
@@ -248,7 +259,6 @@ dnf_install \
     libwebp-devel \
     libxml2-devel \
     libxslt-devel \
-    libzip-devel \
     openldap-devel \
     cyrus-sasl-devel \
     openssl-devel \
@@ -257,6 +267,9 @@ dnf_install \
     redhat-rpm-config \
     xorg-x11-fonts-Type1 \
     xorg-x11-fonts-75dpi
+
+# Optional dependencies (CRB/EPEL - may not be available without subscription)
+dnf_install libzip-devel 2>/dev/null || echo "WARN: libzip-devel not available (needs CRB/EPEL). Skipping — not required for core Odoo."
 
 echo -e "\n---- Install Python packages / Odoo 19 requirements ----"
 pip_install -r "https://github.com/odoo/odoo/raw/${OE_VERSION}/requirements.txt"
