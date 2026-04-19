@@ -187,43 +187,59 @@ sudo dnf config-manager --set-enabled codeready-builder-for-rhel-${RHEL_VERSION}
 sudo subscription-manager repos --enable codeready-builder-for-rhel-${RHEL_VERSION}-${ARCH}-rpms 2>/dev/null || true
 
 #--------------------------------------------------
-# Install PostgreSQL
+# Install PostgreSQL 17
 #--------------------------------------------------
-echo -e "\n---- Install PostgreSQL (mode: ${POSTGRESQL_MODE}) ----"
+echo -e "\n---- Install PostgreSQL 17 (mode: ${POSTGRESQL_MODE}) ----"
 
-# Try PGDG repo (external - may be blocked by proxy)
-# If it fails, we'll fall back to RHEL AppStream PostgreSQL
+# Try to set up PGDG repo:
+#   1. Check if a local RPM exists (for proxy-blocked environments)
+#   2. Otherwise try to download from download.postgresql.org
 PGDG_AVAILABLE="False"
-timeout 15 sudo dnf install -y --nogpgcheck \
-  https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
-  2>/dev/null && PGDG_AVAILABLE="True"
+
+if [ -f /tmp/pgdg-redhat-repo-latest.noarch.rpm ]; then
+    echo "Using locally provided PGDG RPM at /tmp/pgdg-redhat-repo-latest.noarch.rpm"
+    sudo dnf install -y --nogpgcheck /tmp/pgdg-redhat-repo-latest.noarch.rpm 2>/dev/null \
+        && PGDG_AVAILABLE="True"
+else
+    timeout 15 sudo dnf install -y --nogpgcheck \
+      https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
+      2>/dev/null && PGDG_AVAILABLE="True"
+fi
 
 if [ "$PGDG_AVAILABLE" = "True" ]; then
     sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
     sudo dnf -qy module disable postgresql 2>/dev/null || true
     sudo dnf clean all
 else
-    echo "INFO: PGDG repo not reachable, using RHEL AppStream PostgreSQL."
+    echo ""
+    echo "======================================================"
+    echo "ERROR: PGDG repo not reachable and no local RPM found."
+    echo "======================================================"
+    echo "PostgreSQL 17 requires the PGDG repository."
+    echo ""
+    echo "Fix options:"
+    echo ""
+    echo " A) Configure proxy to allow download.postgresql.org, then re-run."
+    echo ""
+    echo " B) Download the PGDG RPM manually on another machine, then:"
+    echo "    scp pgdg-redhat-repo-latest.noarch.rpm odooapp@this-server:/tmp/"
+    echo "    Then re-run this script."
+    echo ""
+    echo "    Download URL:"
+    echo "    https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm"
+    echo ""
+    exit 1
 fi
 
 if [ "$POSTGRESQL_MODE" = "local" ]; then
-    if [ "$PGDG_AVAILABLE" = "True" ]; then
-        echo -e "\n---- Installing PostgreSQL 17 Server locally (from PGDG) ----"
-        dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
-        sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
-        sudo systemctl start postgresql-17
-        sudo systemctl enable postgresql-17
-        PG_BIN_PATH="/usr/pgsql-17/bin"
-    else
-        echo -e "\n---- Installing PostgreSQL Server locally (from RHEL AppStream) ----"
-        dnf_install postgresql-server postgresql-contrib postgresql-server-devel
-        sudo postgresql-setup --initdb
-        sudo systemctl start postgresql
-        sudo systemctl enable postgresql
-        PG_BIN_PATH="/usr/bin"
-    fi
+    echo -e "\n---- Installing PostgreSQL 17 Server locally (from PGDG) ----"
+    dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
+    sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
+    sudo systemctl start postgresql-17
+    sudo systemctl enable postgresql-17
+    PG_BIN_PATH="/usr/pgsql-17/bin"
 
-    if [ "$IS_ENTERPRISE" = "True" ] && [ "$PGDG_AVAILABLE" = "True" ]; then
+    if [ "$IS_ENTERPRISE" = "True" ]; then
         # pgvector is needed for Enterprise AI features
         echo -e "\n---- Installing pgvector for Enterprise AI features ----"
         dnf_install pgvector_17 2>/dev/null || true
@@ -242,15 +258,9 @@ SQL
 
 else
     # Remote PostgreSQL - only need client libs + devel for psycopg2 build
-    if [ "$PGDG_AVAILABLE" = "True" ]; then
-        echo -e "\n---- Installing PostgreSQL 17 client libs only (from PGDG, remote DB) ----"
-        dnf_install postgresql17-libs postgresql17-devel postgresql17
-        PG_BIN_PATH="/usr/pgsql-17/bin"
-    else
-        echo -e "\n---- Installing PostgreSQL client libs only (from RHEL AppStream, remote DB) ----"
-        dnf_install postgresql postgresql-server-devel libpq libpq-devel
-        PG_BIN_PATH="/usr/bin"
-    fi
+    echo -e "\n---- Installing PostgreSQL 17 client libs only (remote DB) ----"
+    dnf_install postgresql17-libs postgresql17-devel postgresql17
+    PG_BIN_PATH="/usr/pgsql-17/bin"
 fi
 
 # Add psql/pg_config to PATH and ensure symlinks exist
