@@ -227,40 +227,60 @@ if rpm -q pgdg-redhat-repo >/dev/null 2>&1 || ls /etc/yum.repos.d/pgdg-*.repo 2>
 fi
 
 #--------------------------------------------------
-# Install any locally uploaded RPMs first
+# Install any locally uploaded RPMs first (ORDERED)
 #--------------------------------------------------
 if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && \
    [ "$(ls -A "$LOCAL_RPMS_DIR" 2>/dev/null | grep -c '\.rpm$')" -gt 0 ]; then
     RPM_COUNT=$(ls -1 "$LOCAL_RPMS_DIR"/*.rpm 2>/dev/null | wc -l)
     echo -e "\n---- Installing $RPM_COUNT locally uploaded RPMs from $LOCAL_RPMS_DIR ----"
-    ls -1 "$LOCAL_RPMS_DIR"/*.rpm | sed 's/^/  /'
 
-    # First install dependencies that postgresql17-devel needs from RHEL repos.
-    # Skip silently if not available (CRB required for clang/llvm).
-    echo "---- Pre-installing dependencies from RHEL AppStream ----"
+    # Pre-install common dependencies from RHEL
+    echo "---- Pre-installing common dependencies from RHEL AppStream ----"
     sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' \
-        libicu-devel perl-core perl-IPC-Run perl-Test-Simple 2>/dev/null || true
-    sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' \
-        clang-devel llvm-devel 2>/dev/null || \
-        echo "INFO: clang-devel/llvm-devel not available (CRB repo needed for --with-llvm). Trying without."
+        libicu-devel perl-core perl-Test-Simple 2>/dev/null || true
 
-    # Install the local RPMs with PGDG repos disabled (they're unreachable)
-    if sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$LOCAL_RPMS_DIR"/*.rpm; then
-        echo "---- All local RPMs installed successfully ----"
-    else
-        echo "---- dnf failed, trying individual installs (skip failing ones) ----"
-        for rpm_file in "$LOCAL_RPMS_DIR"/*.rpm; do
-            echo "  Installing: $(basename "$rpm_file")"
-            sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$rpm_file" 2>&1 | tail -5 || \
-                echo "    SKIP: Could not install $(basename "$rpm_file")"
-        done
+    # postgresql17-libs MUST install FIRST (others depend on it)
+    LIBS_RPM=$(ls "$LOCAL_RPMS_DIR"/postgresql17-libs-*.rpm 2>/dev/null | head -1)
+    if [ -n "$LIBS_RPM" ]; then
+        echo "  [1/N] Installing $(basename "$LIBS_RPM")"
+        sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$LIBS_RPM" || \
+            echo "    WARN: postgresql17-libs install failed"
     fi
 
-    # Verify what actually got installed
+    # postgresql17 (psql client) - depends on libs
+    MAIN_RPM=$(ls "$LOCAL_RPMS_DIR"/postgresql17-17*.rpm 2>/dev/null | grep -v -- "-libs-\|-devel-\|-contrib-\|-server-" | head -1)
+    if [ -n "$MAIN_RPM" ]; then
+        echo "  [2/N] Installing $(basename "$MAIN_RPM")"
+        sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$MAIN_RPM" || \
+            echo "    WARN: postgresql17 install failed"
+    fi
+
+    # postgresql17-devel (needs perl-IPC-Run which is in EPEL)
+    # If EPEL not available, this fails - that's OK because psycopg2-binary
+    # skips the build anyway
+    DEVEL_RPM=$(ls "$LOCAL_RPMS_DIR"/postgresql17-devel-*.rpm 2>/dev/null | head -1)
+    if [ -n "$DEVEL_RPM" ]; then
+        echo "  [3/N] Installing $(basename "$DEVEL_RPM")"
+        sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$DEVEL_RPM" || \
+            echo "    INFO: postgresql17-devel install failed (likely missing perl-IPC-Run from EPEL). Will use psycopg2-binary instead."
+    fi
+
+    # Install any other RPMs we haven't installed yet
+    for rpm_file in "$LOCAL_RPMS_DIR"/*.rpm; do
+        pkg_name=$(rpm -qp --qf '%{NAME}' "$rpm_file" 2>/dev/null)
+        if [ -n "$pkg_name" ] && ! rpm -q "$pkg_name" >/dev/null 2>&1; then
+            echo "  [other] Installing $(basename "$rpm_file")"
+            sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$rpm_file" 2>&1 | tail -3 || true
+        fi
+    done
+
+    # Verify
     echo "---- Installed versions of key packages: ----"
     for pkg in postgresql17 postgresql17-libs postgresql17-devel libzip-devel epel-release; do
         if rpm -q "$pkg" >/dev/null 2>&1; then
             echo "  [OK]  $(rpm -q "$pkg")"
+        else
+            echo "  [--]  $pkg (not installed)"
         fi
     done
 fi
@@ -330,14 +350,17 @@ if [ "$POSTGRESQL_MODE" = "remote" ]; then
     else
         echo "---- Installing PostgreSQL client libs from RHEL AppStream ----"
         echo "(libpq is wire-compatible; works with PG17 server on remote machine)"
-        dnf_install postgresql postgresql-server-devel libpq libpq-devel
+        # Don't install postgresql-server-devel (conflicts with libpq-devel)
+        # We'll use psycopg2-binary which doesn't need pg_config to build
+        dnf_install postgresql libpq libpq-devel
     fi
 
-    # Verify pg_config is reachable (needed for psycopg2 build)
+    # pg_config is only needed if psycopg2 is built from source.
+    # We use psycopg2-binary to avoid this requirement.
     if command -v pg_config >/dev/null 2>&1; then
         echo "  pg_config: $(which pg_config) -> $(pg_config --version)"
     else
-        echo "  WARN: pg_config not in PATH. psycopg2 build will fail."
+        echo "  INFO: pg_config not in PATH. Will use psycopg2-binary (no build needed)."
     fi
 
 else
@@ -412,7 +435,21 @@ fi
 # Install System Dependencies
 #--------------------------------------------------
 echo -e "\n---- Installing Python 3 + pip3 ----"
-dnf_install python3 python3-pip python3-devel python3-setuptools python3-wheel
+# Install critical packages first (must succeed)
+dnf_install python3 python3-pip python3-devel python3-setuptools
+# python3-wheel may not be in RHEL 10 - install via pip if dnf fails
+dnf_install python3-wheel 2>/dev/null || {
+    echo "INFO: python3-wheel not in repo, will install via pip"
+}
+
+# Verify pip3 is available
+if ! command -v pip3 >/dev/null 2>&1; then
+    echo "ERROR: pip3 not installed after dnf. Trying alternative..."
+    sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' python3-pip || exit 1
+fi
+
+# Install wheel via pip if not present
+python3 -c "import wheel" 2>/dev/null || pip_install wheel
 
 echo -e "\n---- Installing system dependencies ----"
 # Core dependencies (always available in RHEL BaseOS + AppStream)
@@ -445,13 +482,27 @@ dnf_install \
 dnf_install libzip-devel 2>/dev/null || echo "WARN: libzip-devel not available (needs CRB/EPEL). Skipping — not required for core Odoo."
 
 echo -e "\n---- Install Python packages / Odoo 19 requirements ----"
-# Try local requirements.txt first (when GitHub is blocked)
+
+# Install psycopg2-binary FIRST (pre-compiled, no pg_config needed)
+# This avoids the psycopg2 source build that requires postgresql-devel
+echo "Installing psycopg2-binary (pre-compiled, avoids pg_config dependency)"
+pip_install psycopg2-binary
+
+# Find the requirements file to use
+REQ_FILE=""
 if [ -f "$OE_LOCAL_REQUIREMENTS" ]; then
-    echo "Using local requirements file: $OE_LOCAL_REQUIREMENTS"
-    pip_install -r "$OE_LOCAL_REQUIREMENTS"
+    REQ_FILE="$OE_LOCAL_REQUIREMENTS"
 elif [ -f "$OE_HOME_EXT/requirements.txt" ]; then
-    echo "Using requirements.txt from Odoo source"
-    pip_install -r "$OE_HOME_EXT/requirements.txt"
+    REQ_FILE="$OE_HOME_EXT/requirements.txt"
+fi
+
+if [ -n "$REQ_FILE" ]; then
+    echo "Using requirements file: $REQ_FILE"
+    # Patch out psycopg2 (already installed as psycopg2-binary)
+    PATCHED_REQ=$(mktemp)
+    grep -v '^psycopg2' "$REQ_FILE" > "$PATCHED_REQ"
+    pip_install -r "$PATCHED_REQ"
+    rm -f "$PATCHED_REQ"
 else
     echo "Downloading requirements.txt from GitHub"
     pip_install -r "https://github.com/odoo/odoo/raw/${OE_VERSION}/requirements.txt" || \
