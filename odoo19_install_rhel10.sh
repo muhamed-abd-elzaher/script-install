@@ -20,8 +20,9 @@ OE_USER="odoo"
 OE_HOME="/$OE_USER"
 OE_HOME_EXT="/$OE_USER/${OE_USER}-server"
 
-# Set to True to install wkhtmltopdf, False if already installed
-INSTALL_WKHTMLTOPDF="True"
+# Set to True to install wkhtmltopdf, False if already installed or if
+# the server can't reach github.com (corporate proxy environments)
+INSTALL_WKHTMLTOPDF="False"
 
 # Default Odoo port (use with -c /etc/odoo-server.conf)
 OE_PORT="8069"
@@ -39,10 +40,11 @@ IS_ENTERPRISE="False"
 POSTGRESQL_MODE="remote"
 
 # Remote PostgreSQL settings (only used when POSTGRESQL_MODE="remote")
-DB_HOST="localhost"
+# EDIT THESE with your real remote DB values
+DB_HOST="10.0.0.50"
 DB_PORT="5432"
 DB_USER="odoo"
-DB_PASSWORD="False"
+DB_PASSWORD="CHANGE_ME"
 
 # Set to True to install Nginx as reverse proxy
 INSTALL_NGINX="True"
@@ -62,9 +64,9 @@ WEBSITE_NAME="_"
 LONGPOLLING_PORT="8072"
 
 # Workers configuration
-# Set to 0 to auto-calculate based on CPU cores: (CPU * 2) + 1
-# Set to a specific number to override
-WORKERS=0
+# Set to 0 to auto-calculate based on CPU cores: (CPU * 2) + 1 (capped at MAX_WORKERS)
+# Set to a specific number to override (recommended for large servers: 8-16)
+WORKERS=8
 
 # Memory limits per worker (in bytes)
 LIMIT_MEMORY_HARD=2684354560
@@ -86,11 +88,17 @@ ADMIN_EMAIL="odoo@example.com"
 #==================================================
 
 # pip install with --break-system-packages if supported (PEP 668 on RHEL 10 / Python 3.12)
+# Preserves proxy env vars so pip can download packages through corporate proxy
 pip_install() {
+  local PIP_ENV=""
+  [ -n "$http_proxy" ]  && PIP_ENV="$PIP_ENV http_proxy=$http_proxy"
+  [ -n "$https_proxy" ] && PIP_ENV="$PIP_ENV https_proxy=$https_proxy"
+  [ -n "$no_proxy" ]    && PIP_ENV="$PIP_ENV no_proxy=$no_proxy"
+
   if pip3 help install 2>/dev/null | grep -q -- '--break-system-packages'; then
-    sudo -H pip3 install --break-system-packages "$@"
+    sudo -H env $PIP_ENV pip3 install --break-system-packages "$@"
   else
-    sudo -H pip3 install "$@"
+    sudo -H env $PIP_ENV pip3 install "$@"
   fi
 }
 
@@ -165,12 +173,12 @@ dnf_install dnf-utils
 #--------------------------------------------------
 # Install EPEL Repository (needed for some dependencies)
 #--------------------------------------------------
-echo -e "\n---- Install EPEL Repository (optional) ----"
-# EPEL is external and may be blocked by corporate proxy. Continue even if it fails.
-dnf_install \
+echo -e "\n---- Install EPEL Repository (optional, skipped behind proxy) ----"
+# EPEL is external and may be blocked by corporate proxy. Try but don't fail.
+timeout 15 sudo dnf install -y --nogpgcheck \
   https://dl.fedoraproject.org/pub/epel/epel-release-latest-${RHEL_VERSION}.noarch.rpm \
-  2>/dev/null || dnf_install epel-release 2>/dev/null || \
-  echo "WARN: EPEL repo not available (proxy may be blocking dl.fedoraproject.org). Continuing without EPEL."
+  2>/dev/null || timeout 15 sudo dnf install -y --nogpgcheck epel-release 2>/dev/null || \
+  echo "INFO: EPEL repo not installed (external mirror not reachable). Continuing without EPEL."
 
 # Enable CodeReady Builder / CRB equivalent (needed for some -devel packages)
 sudo dnf config-manager --set-enabled crb 2>/dev/null || \
@@ -182,30 +190,39 @@ sudo subscription-manager repos --enable codeready-builder-for-rhel-${RHEL_VERSI
 #--------------------------------------------------
 echo -e "\n---- Install PostgreSQL (mode: ${POSTGRESQL_MODE}) ----"
 
-# Install PGDG repository (needed for both modes)
-dnf_install \
+# Try PGDG repo (external - may be blocked by proxy)
+# If it fails, we'll fall back to RHEL AppStream PostgreSQL
+PGDG_AVAILABLE="False"
+timeout 15 sudo dnf install -y --nogpgcheck \
   https://download.postgresql.org/pub/repos/yum/reporpms/EL-${RHEL_VERSION}-${ARCH}/pgdg-redhat-repo-latest.noarch.rpm \
-  2>/dev/null || true
+  2>/dev/null && PGDG_AVAILABLE="True"
 
-# Import PGDG GPG key
-sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
-
-# Disable built-in PostgreSQL module to avoid conflicts
-sudo dnf -qy module disable postgresql 2>/dev/null || true
-sudo dnf clean all
+if [ "$PGDG_AVAILABLE" = "True" ]; then
+    sudo rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL 2>/dev/null || true
+    sudo dnf -qy module disable postgresql 2>/dev/null || true
+    sudo dnf clean all
+else
+    echo "INFO: PGDG repo not reachable, using RHEL AppStream PostgreSQL."
+fi
 
 if [ "$POSTGRESQL_MODE" = "local" ]; then
-    echo -e "\n---- Installing PostgreSQL 17 Server locally ----"
-    dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
+    if [ "$PGDG_AVAILABLE" = "True" ]; then
+        echo -e "\n---- Installing PostgreSQL 17 Server locally (from PGDG) ----"
+        dnf_install postgresql17 postgresql17-server postgresql17-contrib postgresql17-devel
+        sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
+        sudo systemctl start postgresql-17
+        sudo systemctl enable postgresql-17
+        PG_BIN_PATH="/usr/pgsql-17/bin"
+    else
+        echo -e "\n---- Installing PostgreSQL Server locally (from RHEL AppStream) ----"
+        dnf_install postgresql-server postgresql-contrib postgresql-server-devel
+        sudo postgresql-setup --initdb
+        sudo systemctl start postgresql
+        sudo systemctl enable postgresql
+        PG_BIN_PATH="/usr/bin"
+    fi
 
-    # Initialize the database cluster
-    sudo /usr/pgsql-17/bin/postgresql-17-setup initdb
-
-    # Start and enable PostgreSQL
-    sudo systemctl start postgresql-17
-    sudo systemctl enable postgresql-17
-
-    if [ "$IS_ENTERPRISE" = "True" ]; then
+    if [ "$IS_ENTERPRISE" = "True" ] && [ "$PGDG_AVAILABLE" = "True" ]; then
         # pgvector is needed for Enterprise AI features
         echo -e "\n---- Installing pgvector for Enterprise AI features ----"
         dnf_install pgvector_17 2>/dev/null || true
@@ -223,17 +240,30 @@ SQL
     sudo su - postgres -c "createuser -s $OE_USER" 2>/dev/null || true
 
 else
-    echo -e "\n---- Installing PostgreSQL 17 client libs only (remote DB) ----"
-    dnf_install postgresql17-libs postgresql17-devel postgresql17
+    # Remote PostgreSQL - only need client libs + devel for psycopg2 build
+    if [ "$PGDG_AVAILABLE" = "True" ]; then
+        echo -e "\n---- Installing PostgreSQL 17 client libs only (from PGDG, remote DB) ----"
+        dnf_install postgresql17-libs postgresql17-devel postgresql17
+        PG_BIN_PATH="/usr/pgsql-17/bin"
+    else
+        echo -e "\n---- Installing PostgreSQL client libs only (from RHEL AppStream, remote DB) ----"
+        dnf_install postgresql postgresql-server-devel libpq libpq-devel
+        PG_BIN_PATH="/usr/bin"
+    fi
 fi
 
-# Add psql/pg_config to PATH for this session and future logins
-echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh
-export PATH=/usr/pgsql-17/bin:$PATH
+# Add psql/pg_config to PATH and ensure symlinks exist
+if [ "$PG_BIN_PATH" != "/usr/bin" ]; then
+    echo "export PATH=${PG_BIN_PATH}:\$PATH" | sudo tee /etc/profile.d/postgresql.sh
+    export PATH=${PG_BIN_PATH}:$PATH
 
-# Create symlinks so pg_config is always findable (even inside sudo)
-sudo ln -sf /usr/pgsql-17/bin/pg_config /usr/bin/pg_config
-sudo ln -sf /usr/pgsql-17/bin/psql /usr/bin/psql
+    # Create symlinks so pg_config is always findable (even inside sudo)
+    [ -f "${PG_BIN_PATH}/pg_config" ] && sudo ln -sf ${PG_BIN_PATH}/pg_config /usr/bin/pg_config
+    [ -f "${PG_BIN_PATH}/psql" ] && sudo ln -sf ${PG_BIN_PATH}/psql /usr/bin/psql
+fi
+
+# Verify pg_config is findable
+which pg_config >/dev/null 2>&1 || echo "WARN: pg_config not in PATH. psycopg2 build will fail."
 
 #--------------------------------------------------
 # Install System Dependencies
@@ -278,20 +308,20 @@ pip_install -r "https://github.com/odoo/odoo/raw/${OE_VERSION}/requirements.txt"
 pip_install phonenumbers
 
 echo -e "\n---- Installing Node.js, npm and rtlcss for LTR support ----"
-# Install Node.js from RHEL AppStream (or NodeSource if needed)
-dnf_install nodejs npm 2>/dev/null
+# Install Node.js from RHEL AppStream (NodeSource fallback skipped - external)
+dnf_install nodejs npm 2>/dev/null || echo "INFO: nodejs/npm not in AppStream. RTL (rtlcss) will be skipped."
 
-# If nodejs version is too old or not available, install from NodeSource
-if ! command -v node >/dev/null 2>&1; then
-    echo -e "\n---- Node.js not found in AppStream, installing from NodeSource ----"
-    curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
-    dnf_install nodejs
+if command -v node >/dev/null 2>&1; then
+    echo -e "---- Node.js version: $(node --version 2>/dev/null) ----"
+    echo -e "---- npm version: $(npm --version 2>/dev/null) ----"
+
+    # rtlcss is only needed for RTL (right-to-left) languages
+    # Skip gracefully if npm registry is blocked by proxy
+    timeout 60 sudo npm install -g rtlcss 2>/dev/null || \
+        echo "INFO: rtlcss install failed (npm registry blocked). RTL support disabled."
+else
+    echo "INFO: Node.js not available. Skipping rtlcss install."
 fi
-
-echo -e "---- Node.js version: $(node --version 2>/dev/null || echo 'not found') ----"
-echo -e "---- npm version: $(npm --version 2>/dev/null || echo 'not found') ----"
-
-sudo npm install -g rtlcss
 
 #--------------------------------------------------
 # Install Wkhtmltopdf
@@ -372,6 +402,12 @@ echo -e "\n==== Installing ODOO 19 Server ===="
 # Mark directories as safe for git (needed when re-running script with different user)
 sudo git config --global --add safe.directory $OE_HOME_EXT
 sudo git config --global --add safe.directory "$OE_HOME/enterprise/addons"
+
+# Pass proxy env to root's git config (sudo strips proxy vars by default)
+if [ -n "$http_proxy" ]; then
+    sudo git config --global http.proxy "$http_proxy"
+    sudo git config --global https.proxy "${https_proxy:-$http_proxy}"
+fi
 
 if [ -d "$OE_HOME_EXT/.git" ]; then
     echo "---- Odoo source already exists, pulling latest changes ----"
