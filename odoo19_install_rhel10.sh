@@ -159,6 +159,45 @@ echo " Workers:      ${WORKERS}"
 echo "============================================================"
 
 #--------------------------------------------------
+# Preflight connectivity check
+#--------------------------------------------------
+echo -e "\n---- Preflight: checking connectivity to external sources ----"
+check_url() {
+    local name="$1"
+    local url="$2"
+    local critical="$3"
+    if timeout 5 curl -fsSI "$url" >/dev/null 2>&1; then
+        echo "  [OK]    $name"
+        return 0
+    else
+        echo "  [FAIL]  $name ${critical:+(CRITICAL)} - $url"
+        return 1
+    fi
+}
+
+echo "Local uploaded files:"
+for f in "$OE_LOCAL_SOURCE" "$OE_LOCAL_REQUIREMENTS" "/tmp/pgdg-redhat-repo-latest.noarch.rpm" "/tmp/wkhtmltox.rpm"; do
+    if [ -f "$f" ]; then
+        echo "  [OK]    $f ($(du -h "$f" | cut -f1))"
+    else
+        echo "  [MISS]  $f"
+    fi
+done
+
+echo ""
+echo "External connectivity:"
+check_url "PyPI (Python packages)"          "https://pypi.org/"
+check_url "files.pythonhosted.org"          "https://files.pythonhosted.org/"
+check_url "PostgreSQL yum"                  "https://download.postgresql.org/"
+check_url "npm registry"                    "https://registry.npmjs.org/"
+check_url "EPEL"                            "https://dl.fedoraproject.org/"
+check_url "GitHub"                          "https://github.com/"
+
+echo ""
+echo "Press Ctrl+C within 5 seconds to abort if connectivity looks wrong..."
+sleep 5
+
+#--------------------------------------------------
 # Fix GPG Keys (RHEL 10 may have outdated/missing signing keys)
 #--------------------------------------------------
 echo -e "\n---- Updating RPM GPG keys ----"
