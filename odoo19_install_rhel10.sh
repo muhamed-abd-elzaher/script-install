@@ -146,8 +146,9 @@ pip_install() {
 }
 
 # dnf wrapper: use --nogpgcheck to work around stale/mismatched GPG keys on RHEL 10
+# Disable pgdg-* repos so dnf doesn't hang when PGDG mirror is blocked
 dnf_install() {
-  sudo dnf install -y --nogpgcheck "$@"
+  sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$@"
 }
 
 # Detect architecture
@@ -216,6 +217,16 @@ if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && [ "$(ls -A "$LOCAL_RP
 fi
 
 #--------------------------------------------------
+# Clean up any previous PGDG repos (they hang dnf when blocked by proxy)
+#--------------------------------------------------
+if rpm -q pgdg-redhat-repo >/dev/null 2>&1 || ls /etc/yum.repos.d/pgdg-*.repo 2>/dev/null | grep -q .; then
+    echo -e "\n---- Removing previously installed PGDG repo (causes dnf hangs) ----"
+    sudo rpm -e pgdg-redhat-repo 2>/dev/null || true
+    sudo rm -f /etc/yum.repos.d/pgdg-*.repo
+    sudo dnf clean all
+fi
+
+#--------------------------------------------------
 # Install any locally uploaded RPMs first
 #--------------------------------------------------
 if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && \
@@ -224,12 +235,25 @@ if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && \
     echo -e "\n---- Installing $RPM_COUNT locally uploaded RPMs from $LOCAL_RPMS_DIR ----"
     ls -1 "$LOCAL_RPMS_DIR"/*.rpm | sed 's/^/  /'
 
-    # dnf resolves dependencies between the local RPMs automatically
-    if sudo dnf install -y --nogpgcheck "$LOCAL_RPMS_DIR"/*.rpm; then
+    # First install dependencies that postgresql17-devel needs from RHEL repos.
+    # Skip silently if not available (CRB required for clang/llvm).
+    echo "---- Pre-installing dependencies from RHEL AppStream ----"
+    sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' \
+        libicu-devel perl-core perl-IPC-Run perl-Test-Simple 2>/dev/null || true
+    sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' \
+        clang-devel llvm-devel 2>/dev/null || \
+        echo "INFO: clang-devel/llvm-devel not available (CRB repo needed for --with-llvm). Trying without."
+
+    # Install the local RPMs with PGDG repos disabled (they're unreachable)
+    if sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$LOCAL_RPMS_DIR"/*.rpm; then
         echo "---- All local RPMs installed successfully ----"
     else
-        echo "---- Some RPMs failed via dnf, trying rpm -Uvh (no dep check) ----"
-        sudo rpm -Uvh --replacefiles --replacepkgs "$LOCAL_RPMS_DIR"/*.rpm 2>&1 || true
+        echo "---- dnf failed, trying individual installs (skip failing ones) ----"
+        for rpm_file in "$LOCAL_RPMS_DIR"/*.rpm; do
+            echo "  Installing: $(basename "$rpm_file")"
+            sudo dnf install -y --nogpgcheck --disablerepo='pgdg-*' "$rpm_file" 2>&1 | tail -5 || \
+                echo "    SKIP: Could not install $(basename "$rpm_file")"
+        done
     fi
 
     # Verify what actually got installed
@@ -258,7 +282,7 @@ sudo dnf clean all
 # Update Server
 #--------------------------------------------------
 echo -e "\n---- Update Server ----"
-sudo dnf update -y --nogpgcheck
+sudo dnf update -y --nogpgcheck --disablerepo='pgdg-*'
 dnf_install dnf-utils
 
 #--------------------------------------------------
