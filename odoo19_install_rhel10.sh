@@ -219,10 +219,26 @@ fi
 # Install any locally uploaded RPMs first
 #--------------------------------------------------
 if [ -n "$LOCAL_RPMS_DIR" ] && [ -d "$LOCAL_RPMS_DIR" ] && \
-   [ "$(ls -A "$LOCAL_RPMS_DIR" 2>/dev/null | grep '\.rpm$')" ]; then
-    echo -e "\n---- Installing locally uploaded RPMs from $LOCAL_RPMS_DIR ----"
-    sudo dnf install -y --nogpgcheck "$LOCAL_RPMS_DIR"/*.rpm 2>&1 | tail -20 || \
-    sudo rpm -Uvh --force --nodeps "$LOCAL_RPMS_DIR"/*.rpm 2>&1 | tail -20 || true
+   [ "$(ls -A "$LOCAL_RPMS_DIR" 2>/dev/null | grep -c '\.rpm$')" -gt 0 ]; then
+    RPM_COUNT=$(ls -1 "$LOCAL_RPMS_DIR"/*.rpm 2>/dev/null | wc -l)
+    echo -e "\n---- Installing $RPM_COUNT locally uploaded RPMs from $LOCAL_RPMS_DIR ----"
+    ls -1 "$LOCAL_RPMS_DIR"/*.rpm | sed 's/^/  /'
+
+    # dnf resolves dependencies between the local RPMs automatically
+    if sudo dnf install -y --nogpgcheck "$LOCAL_RPMS_DIR"/*.rpm; then
+        echo "---- All local RPMs installed successfully ----"
+    else
+        echo "---- Some RPMs failed via dnf, trying rpm -Uvh (no dep check) ----"
+        sudo rpm -Uvh --replacefiles --replacepkgs "$LOCAL_RPMS_DIR"/*.rpm 2>&1 || true
+    fi
+
+    # Verify what actually got installed
+    echo "---- Installed versions of key packages: ----"
+    for pkg in postgresql17 postgresql17-libs postgresql17-devel libzip-devel epel-release; do
+        if rpm -q "$pkg" >/dev/null 2>&1; then
+            echo "  [OK]  $(rpm -q "$pkg")"
+        fi
+    done
 fi
 
 #--------------------------------------------------
@@ -274,14 +290,31 @@ echo -e "\n---- Install PostgreSQL (mode: ${POSTGRESQL_MODE}) ----"
 
 if [ "$POSTGRESQL_MODE" = "remote" ]; then
     # REMOTE MODE: only need client libs for psycopg2.
-    # libpq is wire-compatible across versions, so RHEL AppStream postgresql
-    # (v16) works fine with a PG17 server. No need for PGDG repo.
-    echo "---- Installing PostgreSQL client libs from RHEL AppStream ----"
-    echo "(libpq is wire-compatible; works with PG17 server on remote machine)"
-    dnf_install postgresql postgresql-server-devel libpq libpq-devel
+    # Prefer PG17 from /tmp/rpms if uploaded, otherwise use RHEL AppStream
+    # (libpq is wire-compatible across versions).
+    if rpm -q postgresql17-devel >/dev/null 2>&1; then
+        echo "---- PostgreSQL 17 client libs already installed from /tmp/rpms ----"
+        # Symlink pg_config from /usr/pgsql-17/bin if needed
+        if [ -f /usr/pgsql-17/bin/pg_config ] && ! command -v pg_config >/dev/null 2>&1; then
+            sudo ln -sf /usr/pgsql-17/bin/pg_config /usr/bin/pg_config
+        fi
+        if [ -f /usr/pgsql-17/bin/psql ] && ! command -v psql >/dev/null 2>&1; then
+            sudo ln -sf /usr/pgsql-17/bin/psql /usr/bin/psql
+        fi
+        echo 'export PATH=/usr/pgsql-17/bin:$PATH' | sudo tee /etc/profile.d/postgresql17.sh >/dev/null
+        export PATH=/usr/pgsql-17/bin:$PATH
+    else
+        echo "---- Installing PostgreSQL client libs from RHEL AppStream ----"
+        echo "(libpq is wire-compatible; works with PG17 server on remote machine)"
+        dnf_install postgresql postgresql-server-devel libpq libpq-devel
+    fi
 
-    # pg_config is already in /usr/bin with RHEL packages, just verify
-    which pg_config >/dev/null 2>&1 || echo "WARN: pg_config not in PATH. psycopg2 build will fail."
+    # Verify pg_config is reachable (needed for psycopg2 build)
+    if command -v pg_config >/dev/null 2>&1; then
+        echo "  pg_config: $(which pg_config) -> $(pg_config --version)"
+    else
+        echo "  WARN: pg_config not in PATH. psycopg2 build will fail."
+    fi
 
 else
     # LOCAL MODE: install PostgreSQL 17 server via PGDG
