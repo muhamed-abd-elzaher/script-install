@@ -58,13 +58,12 @@ OE_VERSION="19.0"
 IS_ENTERPRISE="False"
 
 # PostgreSQL configuration
-# Set to "local" to install PostgreSQL server locally (uses PGDG 17 if reachable,
-#   else RHEL AppStream PostgreSQL)
+# Set to "local" to install PostgreSQL 17 server locally
 # Set to "remote" to only install client libs (PostgreSQL is on another machine)
-POSTGRESQL_MODE="local"
+POSTGRESQL_MODE="remote"
 
 # Remote PostgreSQL settings (only used when POSTGRESQL_MODE="remote")
-# Ignored when POSTGRESQL_MODE="local"
+# You can leave these as placeholders and edit /etc/odoo-server.conf later
 DB_HOST="localhost"
 DB_PORT="5432"
 DB_USER="odoo"
@@ -186,23 +185,9 @@ echo " Workers:      ${WORKERS}"
 echo "============================================================"
 
 #--------------------------------------------------
-# Preflight connectivity check
+# Preflight: check local uploaded files
 #--------------------------------------------------
-echo -e "\n---- Preflight: checking connectivity to external sources ----"
-check_url() {
-    local name="$1"
-    local url="$2"
-    local critical="$3"
-    if timeout 5 curl -fsSI "$url" >/dev/null 2>&1; then
-        echo "  [OK]    $name"
-        return 0
-    else
-        echo "  [FAIL]  $name ${critical:+(CRITICAL)} - $url"
-        return 1
-    fi
-}
-
-echo "Local uploaded files:"
+echo -e "\n---- Preflight: checking local uploaded files ----"
 for f in "$OE_LOCAL_SOURCE" "$OE_LOCAL_REQUIREMENTS" "/tmp/pgdg-redhat-repo-latest.noarch.rpm" "/tmp/wkhtmltox.rpm"; do
     if [ -f "$f" ]; then
         echo "  [OK]    $f ($(du -h "$f" | cut -f1))"
@@ -211,29 +196,12 @@ for f in "$OE_LOCAL_SOURCE" "$OE_LOCAL_REQUIREMENTS" "/tmp/pgdg-redhat-repo-late
     fi
 done
 
-echo ""
-echo "Offline package directories (optional, for airgapped installs):"
-for d in "$PIP_LOCAL_DIR" "$PG17_LOCAL_DIR"; do
-    if [ -n "$d" ] && [ -d "$d" ] && [ "$(ls -A "$d" 2>/dev/null)" ]; then
-        count=$(ls -1 "$d" 2>/dev/null | wc -l)
-        echo "  [OK]    $d ($count files)"
-    else
-        echo "  [MISS]  $d (will use online sources)"
-    fi
-done
-
-echo ""
-echo "External connectivity:"
-check_url "PyPI (Python packages)"          "https://pypi.org/"
-check_url "files.pythonhosted.org"          "https://files.pythonhosted.org/"
-check_url "PostgreSQL yum"                  "https://download.postgresql.org/"
-check_url "npm registry"                    "https://registry.npmjs.org/"
-check_url "EPEL"                            "https://dl.fedoraproject.org/"
-check_url "GitHub"                          "https://github.com/"
-
-echo ""
-echo "Press Ctrl+C within 5 seconds to abort if connectivity looks wrong..."
-sleep 5
+if [ -n "$PIP_LOCAL_DIR" ] && [ -d "$PIP_LOCAL_DIR" ] && [ "$(ls -A "$PIP_LOCAL_DIR" 2>/dev/null)" ]; then
+    echo "  [OK]    $PIP_LOCAL_DIR ($(ls -1 "$PIP_LOCAL_DIR" | wc -l) files)"
+fi
+if [ -n "$PG17_LOCAL_DIR" ] && [ -d "$PG17_LOCAL_DIR" ] && [ "$(ls -A "$PG17_LOCAL_DIR" 2>/dev/null)" ]; then
+    echo "  [OK]    $PG17_LOCAL_DIR ($(ls -1 "$PG17_LOCAL_DIR" | wc -l) files)"
+fi
 
 #--------------------------------------------------
 # Fix GPG Keys (RHEL 10 may have outdated/missing signing keys)
