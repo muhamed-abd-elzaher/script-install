@@ -35,16 +35,17 @@ OE_VERSION="19.0"
 IS_ENTERPRISE="False"
 
 # PostgreSQL configuration
-# Set to "local" to install PostgreSQL 17 server locally
+# Set to "local" to install PostgreSQL server locally (uses PGDG 17 if reachable,
+#   else RHEL AppStream PostgreSQL)
 # Set to "remote" to only install client libs (PostgreSQL is on another machine)
-POSTGRESQL_MODE="remote"
+POSTGRESQL_MODE="local"
 
 # Remote PostgreSQL settings (only used when POSTGRESQL_MODE="remote")
-# EDIT THESE with your real remote DB values
-DB_HOST="10.0.0.50"
+# Ignored when POSTGRESQL_MODE="local"
+DB_HOST="localhost"
 DB_PORT="5432"
 DB_USER="odoo"
-DB_PASSWORD="CHANGE_ME"
+DB_PASSWORD="False"
 
 # Set to True to install Nginx as reverse proxy
 INSTALL_NGINX="True"
